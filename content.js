@@ -1,679 +1,994 @@
-
+// Cleanse (X Region Blocker) v1.1
+// Built from modular src/ — edit src/content/*.js, then run: node build.js
 
 (function () {
   'use strict';
+  if (window.__xrbContentLoaded) return;   // guard against double injection
+  window.__xrbContentLoaded = true;
 
-  const CHANNEL   = '__xrb_data__';
-  const CACHE_KEY = 'xrb_location_cache_v2';
+  // ── state.js ──
+  const CHANNEL = '__xrb_data__';
+  const READY_EVENT = '__xrb_ready__';
+  const CACHE_KEY = 'xrb_location_cache_v3';   // v3: drops entries that may have come from free-text profile locations
+  const TEMPLATE_KEY = 'xrb_about_template_v1';
   const CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
-  const NEG_TTL   =  3 * 24 * 60 * 60 * 1000;
+  const NEG_TTL = 3 * 24 * 60 * 60 * 1000;
 
+  // ── Settings ──
+  let blockedRegions = [];
+  let blockedRegexes = [];
+  let blockMode = 'overlay';
+  let blockAffiliate = false;      // posts with affiliate links / disclosures (+ repeat offenders)
+  let blockAffiliated = false;     // accounts wearing an X "affiliated with" badge
+  let whitelistMode = 'mutuals';   // 'mutuals' | 'following' | 'none'
+  let showLabels = true;
+  let themeColor = '#ff2222';
+  let labelColor = '#22c55e';      // region label colour (popup option)
 
+  // ── Runtime data ──
+  const memCache = new Map();          // username -> { country, ts, src }
+  const profileLoc = new Map();        // username -> self-written profile location (free text)
+  const relCache = new Map();          // username -> { following, followedBy }
+  const affiliatedUsers = new Set();
+  const affiliateUserCounts = new Map();
+  const affiliateTweetIds = new Set();
+  const pendingUsernames = new Set();
+  const AFFILIATE_USER_THRESHOLD = 3;  // affiliate posts seen before the whole account counts
+  let ownUsername = '';
 
-  let blockedRegions   = [];
-  let blockMode        = 'overlay';
-  let memCache         = new Map();
-  let blockedUsernames = new Set();
-  let pendingUsernames = new Set();
-
+  // ── Rate limiting (kept deliberately gentle: X rate-limits AboutAccountQuery hard,
+  //    and that limit is shared with X's own "About this account" screen) ──
+  const BASE_INTERVAL = 2000;
+  const MAX_BACKOFF = 60000;
+  const MAX_CONCURRENT = 1;
+  let backoffMs = BASE_INTERVAL;
   let rateLimitedUntil = 0;
-  let lastRequestTime  = 0;
-  let backoffMs        = 800;     
-  const MAX_BACKOFF    = 60000;    
-  const MAX_CONCURRENT = 2;
-  let   activeRequests = 0;
+  let activeRequests = 0;
+  let nativeAboutAt = 0;               // last time X itself called/showed AboutAccountQuery
 
-  let aboutQueryHash = 'XRqGa7EeokUU5kppkh13EA';
-  const HASH_FALLBACKS = [
-    'XRqGa7EeokUU5kppkh13EA',
-    'G3KGOASz96M-Qu0nwmGXNg',
-    'qW5u-DAuXpMEG0zA1F7UGQ',
-    'SAMkL5y_N9pmahSw8yy6gA',
-  ];
+  const aboutTemplate = {
+      hash: 'XRqGa7EeokUU5kppkh13EA',   // last-resort default; real hash is learned from X's traffic / bundle
+      features: null,
+      fieldToggles: null
+  };
 
   const BEARER = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
 
-  const SKIP = new Set(['home','explore','notifications','messages','search',
-    'settings','i','compose','intent','hashtag','about','following',
-    'followers','lists','bookmarks','verified_followers','super_follows',
-    'who_to_follow','topics','connect_people']);
+  const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'search',
+      'settings', 'i', 'compose', 'intent', 'hashtag', 'about', 'following',
+      'followers', 'lists', 'bookmarks', 'verified_followers', 'super_follows',
+      'who_to_follow', 'topics', 'connect_people', 'jobs', 'communities', 'premium']);
+
+  const HANDLE_RE = /^@([A-Za-z0-9_]{1,15})$/;
+  const SENSITIVE_PATH = /^\/(notifications|messages|i\/chat)/;
+  const ARTICLE_SEL = 'article[data-testid="tweet"], article[role="article"]';
 
   let lastPath = '';
 
-  async function init() {
-    await loadDiskCache();
-    loadSettings(async () => {
-      listenToInjector();
-      startObserver();
-      startIntersectionObserver();
-      startIntervalScan();
-      discoverQueryHash();
+  const lookupQueue = [];
+  const lookupQueueSet = new Set();
+  const MAX_QUEUE_SIZE = 60;
+  let queueRunning = false;
 
-      scanAll();
-      setTimeout(scanAll, 500);
-      setTimeout(scanAll, 1500);
-      setTimeout(scanAll, 3000);
-      setTimeout(checkProfilePage, 1000);
-      setTimeout(checkProfilePage, 2500);
-      setTimeout(checkProfilePage, 4000);
-    });
-    console.log('[XRB] v1.0 ready');
+  // ── helpers ──
+  function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+  function compileRegions() {
+      // word-boundary match: "india" no longer matches "indiana", "niger" no longer matches "nigeria"
+      blockedRegexes = blockedRegions.map(r => new RegExp('(?:^|[^a-z0-9])' + escapeRegex(r) + '(?:$|[^a-z0-9])', 'i'));
   }
-
-
-
-  function loadSettings(cb) {
-    chrome.storage.sync.get(['blockedRegions', 'blockMode'], data => {
-      blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim());
-      blockMode      = data.blockMode || 'overlay';
-      console.log('[XRB] Settings:', blockedRegions, blockMode);
-      if (cb) cb();
-    });
-  }
-
-  chrome.storage.onChanged.addListener(changes => {
-    if (changes.blockedRegions || changes.blockMode) {
-      loadSettings(() => {
-        blockedUsernames.clear();
-        pendingUsernames.clear();
-        clearVisualTreatments();
-        memCache.forEach((val, username) => {
-          if (val.country && isBlocked(val.country)) blockedUsernames.add(username);
-        });
-        scanAll();
-        checkProfilePage();
-      });
-    }
-  });
 
   function isBlocked(text) {
-    if (!text || !blockedRegions.length) return false;
-    const t = text.toLowerCase().trim();
-    return blockedRegions.some(r => t.includes(r));
+      if (!text || !blockedRegexes.length) return false;
+      const t = String(text).trim();
+      return blockedRegexes.some(re => re.test(t));
   }
 
-
-  async function loadDiskCache() {
-    try {
-      const stored = await chrome.storage.local.get(CACHE_KEY);
-      const raw = stored[CACHE_KEY] || {};
-      const now = Date.now();
-      let loaded = 0;
-      for (const [username, entry] of Object.entries(raw)) {
-        const ttl = entry.country ? CACHE_TTL : NEG_TTL;
-        if (now - entry.ts < ttl) {
-          memCache.set(username, entry);
-          if (entry.country && isBlocked(entry.country)) {
-            blockedUsernames.add(username);
-          }
-          loaded++;
-        }
-      }
-      console.log('[XRB] Cache loaded:', loaded, 'entries,', blockedUsernames.size, 'blocked');
-    } catch (e) {}
+  function relKnown(u) {
+      const r = relCache.get(u);
+      if (!r) return false;
+      if (whitelistMode === 'following') return typeof r.following === 'boolean';
+      return typeof r.following === 'boolean' && typeof r.followedBy === 'boolean';
   }
 
-  async function saveToDiskCache(username, country) {
-    try {
-      const stored = await chrome.storage.local.get(CACHE_KEY);
-      const raw = stored[CACHE_KEY] || {};
-      raw[username] = { country: country || '', ts: Date.now() };
-      if (Object.keys(raw).length > 8000) {
-        const sorted = Object.entries(raw).sort((a,b) => b[1].ts - a[1].ts).slice(0, 6000);
-        await chrome.storage.local.set({ [CACHE_KEY]: Object.fromEntries(sorted) });
+  // Accounts that are never blocked: yourself, and (per setting) mutuals / accounts you follow
+  function isExempt(u) {
+      if (!u) return false;
+      if (ownUsername && u === ownUsername) return true;
+      if (whitelistMode === 'none') return false;
+      const r = relCache.get(u);
+      if (!r) return false;
+      if (whitelistMode === 'following') return r.following === true;
+      return r.following === true && r.followedBy === true;
+  }
+
+  // Returns true when this update changes what we should do with the account
+  function updateRel(u, following, followedBy) {
+      const key = () => `${isExempt(u)}|${relKnown(u)}`;
+      const before = key();
+      const prev = relCache.get(u) || {};
+      relCache.set(u, {
+          following: typeof following === 'boolean' ? following : prev.following,
+          followedBy: typeof followedBy === 'boolean' ? followedBy : prev.followedBy
+      });
+      return before !== key();
+  }
+
+  // Returns the matched region text if this account should be blocked, else ''.
+  // "Account based in" (from X) is authoritative; the free-text profile location is only a fallback for BLOCKING
+  // when X has no region for the account. It is never shown as a label.
+  function blockReason(u) {
+      const e = memCache.get(u);
+      let reason = '';
+      if (e && e.country) {
+          if (isBlocked(e.country)) reason = e.country;
       } else {
-        await chrome.storage.local.set({ [CACHE_KEY]: raw });
+          const p = profileLoc.get(u);
+          if (p && isBlocked(p)) reason = p;
       }
-    } catch (e) {}
+      if (!reason) return '';
+      if (isExempt(u)) return '';
+      // In notifications/inbox we don't hide an account until we KNOW it isn't someone you follow
+      if (whitelistMode !== 'none' && !relKnown(u) && SENSITIVE_PATH.test(window.location.pathname)) return '';
+      return reason;
   }
 
-  function cacheResult(username, country) {
-    const lower = username.toLowerCase();
-    memCache.set(lower, { country: country || '', ts: Date.now() });
-    saveToDiskCache(lower, country);
-    if (country && isBlocked(country)) {
-      blockedUsernames.add(lower);
-      rescanDOM();
-      checkProfilePage();
-    }
-  }
+  function isUserBlocked(u) { return !!blockReason(u); }
 
-
-
-  async function discoverQueryHash() {
-    try {
-      const scripts = [...document.querySelectorAll('script[src*="main."]')];
-      for (const script of scripts.slice(0, 3)) {
-        const res = await fetch(script.src);
-        if (!res.ok) continue;
-        const text = await res.text();
-        const m1 = text.match(/["']([A-Za-z0-9_-]{20,})["'][^"']{0,80}AboutAccountQuery/);
-        const m2 = text.match(/AboutAccountQuery[^"']{0,80}["']([A-Za-z0-9_-]{20,})["']/);
-        const hash = (m1 || m2)?.[1];
-        if (hash) {
-          aboutQueryHash = hash;
-          console.log('[XRB] Discovered hash:', hash);
-          return;
-        }
-      }
-    } catch (e) {}
-  }
-
-
-  async function lookupViaGraphQL(username) {
-    const lower = username.toLowerCase();
-
-    if (Date.now() < rateLimitedUntil) return null;
-
-    const cached = memCache.get(lower);
-    if (cached) {
-      const ttl = cached.country ? CACHE_TTL : NEG_TTL;
-      if (Date.now() - cached.ts < ttl) return cached.country || null;
-    }
-
-    if (pendingUsernames.has(lower)) return null;
-    if (activeRequests >= MAX_CONCURRENT) return null;
-
-    const elapsed = Date.now() - lastRequestTime;
-    if (elapsed < backoffMs) await sleep(backoffMs - elapsed);
-
-    pendingUsernames.add(lower);
-    activeRequests++;
-    lastRequestTime = Date.now();
-
-    const hashes = [aboutQueryHash, ...HASH_FALLBACKS.filter(h => h !== aboutQueryHash)];
-
-    for (const hash of hashes) {
-      try {
-        const variables = encodeURIComponent(JSON.stringify({ screenName: lower }));
-        const features  = encodeURIComponent(JSON.stringify({
-          hidden_profile_subscriptions_enabled: true,
-          responsive_web_graphql_exclude_directive_enabled: true,
-          verified_phone_label_enabled: false
-        }));
-        const url = `https://x.com/i/api/graphql/${hash}/AboutAccountQuery?variables=${variables}&features=${features}`;
-
-        const res = await fetch(url, {
-          headers: {
-            'authorization': `Bearer ${BEARER}`,
-            'x-csrf-token': getCsrfToken(),
-            'x-twitter-active-user': 'yes',
-            'x-twitter-auth-type': 'OAuth2Session',
-          },
-          credentials: 'include'
-        });
-
-        if (res.status === 429) {
-          backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF);
-          rateLimitedUntil = Date.now() + (15 * 60 * 1000);
-          console.log('[XRB] 429 — backing off until', new Date(rateLimitedUntil).toLocaleTimeString(), '| next interval:', backoffMs, 'ms');
-          activeRequests--;
-          pendingUsernames.delete(lower);
-          return null;
-        }
-
-        if (res.status === 403 || res.status === 401) {
-          activeRequests--;
-          pendingUsernames.delete(lower);
-          cacheResult(lower, '');
-          return null;
-        }
-
-        if (!res.ok) continue;
-
-        const data = await res.json();
-        if (data.errors) continue;
-
-        const result  = data?.data?.user_result_by_screen_name?.result
-                     || data?.data?.user?.result;
-        let country   = result?.about_profile?.account_based_in || '';
-
-        if (!country) {
-          country = result?.legacy?.location || '';
-        }
-
-        if (!country) {
-          try {
-            const ubsnVars = encodeURIComponent(JSON.stringify({ screen_name: lower, withSafetyModeUserFields: true }));
-            const ubsnFeatures = encodeURIComponent(JSON.stringify({ hidden_profile_subscriptions_enabled: true, responsive_web_graphql_exclude_directive_enabled: true, verified_phone_label_enabled: false }));
-            const ubsnHashes = ['G3KGOASz96M-Qu0nwmGXNg', 'qW5u-DAuXpMEG0zA1F7UGQ', 'SAMkL5y_N9pmahSw8yy6gA'];
-            for (const ubsnHash of ubsnHashes) {
-              const ubsnUrl = `https://x.com/i/api/graphql/${ubsnHash}/UserByScreenName?variables=${ubsnVars}&features=${ubsnFeatures}`;
-              const ubsnRes = await fetch(ubsnUrl, {
-                headers: {
-                  'authorization': `Bearer ${BEARER}`,
-                  'x-csrf-token': getCsrfToken(),
-                  'x-twitter-active-user': 'yes',
-                  'x-twitter-auth-type': 'OAuth2Session',
-                },
-                credentials: 'include'
-              });
-              if (!ubsnRes.ok) continue;
-              const ubsnData = await ubsnRes.json();
-              const ubsnLoc = ubsnData?.data?.user?.result?.legacy?.location || '';
-              if (ubsnLoc) { country = ubsnLoc; break; }
-            }
-          } catch(e) {}
-        }
-
-        console.log('[XRB] Lookup:', lower, '->', country || '(none)');
-        if (hash !== aboutQueryHash) {
-          aboutQueryHash = hash;
-          console.log('[XRB] Updated working hash to:', hash);
-        }
-        backoffMs = Math.max(800, backoffMs * 0.8);
-
-        cacheResult(lower, country);
-        activeRequests--;
-        pendingUsernames.delete(lower);
-        return country || null;
-
-      } catch (e) { continue; }
-    }
-
-    cacheResult(lower, '');
-    activeRequests--;
-    pendingUsernames.delete(lower);
-    return null;
-  }
-
-  function getCsrfToken() {
-    const match = document.cookie.match(/ct0=([^;]+)/);
-    return match ? match[1] : '';
-  }
-
-  function listenToInjector() {
-    window.addEventListener(CHANNEL, (e) => {
-      const { type, payload } = e.detail || {};
-      if (type === 'about_country') {
-        console.log('[XRB] Free data from X:', payload.username, '->', payload.country);
-        cacheResult(payload.username, payload.country);
-      }
-      if (type === 'legacy_location') {
-        const { username, location } = payload;
-        if (location && isBlocked(location)) {
-          cacheResult(username, location);
-        } else if (!memCache.has(username)) {
-          queueLookup(username);
-        }
-      }
-    });
-  }
-
-
-  const lookupQueue    = [];
-  const lookupQueueSet = new Set(); 
-  const MAX_QUEUE_SIZE = 100;       
-  let   queueRunning   = false;
-
-  function queueLookup(username) {
-    const lower = username.toLowerCase();
-    if (memCache.has(lower) || pendingUsernames.has(lower) || blockedUsernames.has(lower)) return;
-    if (lookupQueueSet.has(lower)) return;
-    if (Date.now() < rateLimitedUntil) return;
-    if (lookupQueue.length >= MAX_QUEUE_SIZE) return;
-    lookupQueue.push(lower);
-    lookupQueueSet.add(lower);
-    if (!queueRunning) drainQueue();
-  }
-
-  async function drainQueue() {
-    if (queueRunning) return;
-    queueRunning = true;
-    while (lookupQueue.length > 0) {
-      if (Date.now() < rateLimitedUntil) {
-        console.log('[XRB] Queue paused — rate limited');
-        break;
-      }
-      if (activeRequests >= MAX_CONCURRENT) {
-        await sleep(200);
-        continue;
-      }
-      const username = lookupQueue.shift();
-      if (!username) continue;
-      lookupQueueSet.delete(username);
-      if (memCache.has(username) || blockedUsernames.has(username)) continue;
-      lookupViaGraphQL(username);
-      await sleep(backoffMs);
-    }
-    queueRunning = false;
-  }
   function escapeHtml(s) {
-    return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  }
-
-  function applyTreatment(article, locationText) {
-    if (article.dataset.xrbDone) return;
-    article.dataset.xrbDone = 'true';
-
-    if (blockMode === 'hide') {
-      article.style.display = 'none';
-      return;
-    }
-    if (blockMode === 'blur') {
-      article.style.filter = 'blur(7px)';
-      article.style.opacity = '0.3';
-      article.style.pointerEvents = 'none';
-      return;
-    }
-
-
-    const tweetCell = article.querySelector('[data-testid="tweet"]') || article;
-    tweetCell.style.position = 'relative';
-
-
-    const avatar = article.querySelector('img[src*="profile_images"]');
-    if (avatar) {
-      const wrap = avatar.closest('a') || avatar.parentElement;
-      if (wrap && !wrap.dataset.xrbCircle) {
-        wrap.style.cssText += 'position:relative!important;display:inline-block!important;z-index:9998!important;';
-        const circle = document.createElement('div');
-        circle.className = 'xrb-red-circle';
-        circle.title = `Blocked: ${locationText}`;
-        wrap.appendChild(circle);
-        wrap.dataset.xrbCircle = 'true';
-      }
-    }
-
-    if (!tweetCell.querySelector('.xrb-overlay')) {
-      const overlay = document.createElement('div');
-      overlay.className = 'xrb-overlay';
-      overlay.style.cssText = [
-        'position:absolute!important',
-        'top:0!important','left:0!important',
-        'width:100%!important','height:100%!important',
-        'background:rgba(0,0,0,0.90)!important',
-        'z-index:9990!important',
-        'pointer-events:none!important',
-        'display:flex!important',
-        'flex-direction:column!important',
-        'align-items:center!important',
-        'justify-content:center!important',
-        'gap:6px!important',
-        'border-radius:inherit!important',
-      ].join(';');
-      overlay.innerHTML = `
-        <div style="width:30px;height:30px;border-radius:50%;border:3px solid #ff3333;position:relative;flex-shrink:0;">
-          <div style="position:absolute;top:50%;left:50%;width:130%;height:3px;background:#ff3333;transform:translate(-50%,-50%) rotate(-45deg);border-radius:2px;"></div>
-        </div>
-        <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.7);letter-spacing:0.08em;text-transform:uppercase;font-family:-apple-system,sans-serif;">Blocked Region</span>
-        <span style="font-size:12px;color:rgba(255,90,90,0.95);font-weight:500;font-family:-apple-system,sans-serif;">${escapeHtml(locationText)}</span>
-      `;
-      tweetCell.appendChild(overlay);
-    }
-  }
-
-
-  function checkProfilePage() {
-    const pathname = window.location.pathname;
-    const pageMatch = pathname.match(/^\/([A-Za-z0-9_]+)(?:\/|$)/);
-    if (!pageMatch) return;
-
-    const username = pageMatch[1].toLowerCase();
-    if (SKIP.has(username)) return;
-
-    if (blockedUsernames.has(username)) {
-      applyProfileBlock(username);
-    } else if (!memCache.has(username) && !pendingUsernames.has(username)) {
-      queueLookup(username);
-    }
-  }
-
-  function applyProfileBlock(username) {
-    const entry   = memCache.get(username);
-    const country = entry?.country || 'blocked region';
-
-    const avatarSelectors = [
-      '[data-testid="UserProfileHeader_Items"] ~ * a[href$="/photo"] img[src*="profile_images"]',
-      'a[href$="/photo"] img[src*="profile_images"]',
-      'a[href*="/photo"] img[src*="profile_images"]',
-      '[data-testid="UserAvatar"] img[src*="profile_images"]',
-      'img[src*="profile_images"][alt]:not([src*="_normal"])',
-    ];
-
-    let profileAvatar = null;
-    for (const sel of avatarSelectors) {
-      profileAvatar = document.querySelector(sel);
-      if (profileAvatar) break;
-    }
-
-    if (profileAvatar) {
-      const wrap = profileAvatar.closest('a, [data-testid="UserAvatar"]') || profileAvatar.parentElement;
-      if (wrap && !wrap.dataset.xrbProfileCircle) {
-        wrap.style.cssText += 'position:relative!important;display:inline-block!important;';
-        wrap.dataset.xrbProfileCircle = 'true';
-
-        const noSymbol = document.createElement('div');
-        noSymbol.className = 'xrb-profile-no-symbol';
-        noSymbol.title = `Blocked: ${country}`;
-        noSymbol.style.cssText = [
-          'position:absolute!important',
-          'inset:0!important',
-          'border-radius:50%!important',
-          'border:4px solid #ff2222!important',
-          'z-index:9999!important',
-          'pointer-events:none!important',
-          'box-sizing:border-box!important',
-          'animation:xrb-pulse 2s ease-in-out infinite!important',
-        ].join(';');
-
-        const slash = document.createElement('div');
-        slash.style.cssText = [
-          'position:absolute!important',
-          'top:50%!important','left:50%!important',
-          'width:135%!important','height:4px!important',
-          'background:#ff2222!important',
-          'transform:translate(-50%,-50%) rotate(-45deg)!important',
-          'border-radius:2px!important',
-        ].join(';');
-        noSymbol.appendChild(slash);
-        wrap.appendChild(noSymbol);
-
-        const tint = document.createElement('div');
-        tint.style.cssText = [
-          'position:absolute!important',
-          'inset:0!important',
-          'border-radius:50%!important',
-          'background:rgba(0,0,0,0.45)!important',
-          'z-index:9998!important',
-          'pointer-events:none!important',
-        ].join(';');
-        wrap.appendChild(tint);
-      }
-    }
-
-    if (!document.querySelector('.xrb-profile-banner')) {
-      const headerItems = document.querySelector('[data-testid="UserProfileHeader_Items"]');
-      if (headerItems) {
-        const banner = document.createElement('div');
-        banner.className = 'xrb-banner xrb-profile-banner';
-        banner.style.cssText = 'margin:8px 0;border-radius:0;';
-        banner.innerHTML = `<span class="xrb-banner-icon">🚫</span><span class="xrb-banner-text">Blocked region: <strong>${escapeHtml(country)}</strong></span>`;
-        headerItems.parentElement.insertBefore(banner, headerItems);
-      }
-    }
-  }
-
-
-  function getUsernameFromArticle(article) {
-   
-    const nameEl = article.querySelector('[data-testid="UserName"] a[href^="/"]');
-    if (nameEl) {
-      const m = nameEl.getAttribute('href').match(/^\/([A-Za-z0-9_]+)(?:\/|\?|$)/);
-      if (m && !SKIP.has(m[1].toLowerCase())) return m[1].toLowerCase();
-    }
-    // Fallback to first non-skip profile link
-    for (const link of article.querySelectorAll('a[href^="/"]')) {
-      const m = (link.getAttribute('href')||'').match(/^\/([A-Za-z0-9_]+)(?:\/|\?|$)/);
-      if (m && !SKIP.has(m[1].toLowerCase())) return m[1].toLowerCase();
-    }
-    return null;
-  }
-
-
-
-  function processArticle(article) {
-    if (article.dataset.xrbDone) return;
-    const username = getUsernameFromArticle(article);
-    if (!username) return;
-
-    if (blockedUsernames.has(username)) {
-      const entry = memCache.get(username);
-      applyTreatment(article, entry?.country || 'blocked region');
-      return;
-    }
-
-    const cached = memCache.get(username);
-    if (cached) {
-      const ttl = cached.country ? CACHE_TTL : NEG_TTL;
-      if (Date.now() - cached.ts < ttl) {
-        if (cached.country && isBlocked(cached.country)) applyTreatment(article, cached.country);
-        return;
-      }
-    }
-
-    article.dataset.xrbQueued = 'true';
-    queueLookup(username);
-  }
-
-
-
-  function rescanDOM() {
-    document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach(art => {
-      if (art.dataset.xrbDone) return;
-      const username = getUsernameFromArticle(art);
-      if (username && blockedUsernames.has(username)) {
-        const entry = memCache.get(username);
-        applyTreatment(art, entry?.country || 'blocked region');
-      }
-    });
-  }
-
-
-  function scanAll() {
-    const articles = document.querySelectorAll('article[data-testid="tweet"], article[role="article"]');
-    console.log('[XRB] scanAll found', articles.length, 'articles on', window.location.pathname);
-    articles.forEach(processArticle);
-  }
-
-
-
-  function clearVisualTreatments() {
-    document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol').forEach(el => el.remove());
-    document.querySelectorAll('[data-xrb-circle], [data-xrb-profile-circle]').forEach(el => {
-      delete el.dataset.xrbCircle;
-      delete el.dataset.xrbProfileCircle;
-    });
-    document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach(el => {
-      el.style.filter = '';
-      el.style.opacity = '';
-      el.style.display = '';
-      el.style.pointerEvents = '';
-      delete el.dataset.xrbDone;
-      delete el.dataset.xrbQueued;
-    });
-  }
-
-
-
-  function startObserver() {
-    new MutationObserver(mutations => {
-      const newArticles = [];
-      let urlChanged = false;
-
-      mutations.forEach(m => {
-        m.addedNodes.forEach(node => {
-          if (node.nodeType !== 1) return;
-          if (node.matches?.('article[data-testid="tweet"], article[role="article"]')) newArticles.push(node);
-          node.querySelectorAll?.('article[data-testid="tweet"], article[role="article"]').forEach(a => newArticles.push(a));
-          if (node.matches?.('[role="dialog"]')) setTimeout(() => checkAboutPopup(node), 400);
-        });
-      });
-
-
-      if (lastPath !== window.location.pathname) {
-        lastPath = window.location.pathname;
-        urlChanged = true;
-        console.log('[XRB] Navigation to:', lastPath);
-
-        document.querySelectorAll('.xrb-profile-banner, .xrb-profile-no-symbol').forEach(el => el.remove());
-        document.querySelectorAll('[data-xrb-profile-circle]').forEach(el => delete el.dataset.xrbProfileCircle);
-        setTimeout(checkProfilePage, 800);
-        setTimeout(scanAll, 300);
-        setTimeout(scanAll, 1200);
-      }
-
-      if (newArticles.length) {
-        clearTimeout(window._xrbObsTimer);
-        window._xrbObsTimer = setTimeout(() => newArticles.forEach(processArticle), 150);
-      }
-    }).observe(document.body, { childList: true, subtree: true });
-
-    lastPath = window.location.pathname;
-  }
-
-
-  function startIntersectionObserver() {
-    const io = new IntersectionObserver(entries => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          const art = entry.target;
-          if (!art.dataset.xrbDone) processArticle(art);
-        }
-      });
-    }, { rootMargin: '500px 0px', threshold: 0 });
-
-    function observe() {
-      document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach(art => {
-        if (!art.dataset.xrbObserved) { art.dataset.xrbObserved = 'true'; io.observe(art); }
-      });
-    }
-    observe();
-    new MutationObserver(observe).observe(document.body, { childList: true, subtree: true });
-  }
-
-
-
-  function startIntervalScan() {
-    setInterval(() => {
-
-      if (blockedUsernames.size > 0) rescanDOM();
-
-
-      checkProfilePage();
-
-
-      document.querySelectorAll('article[data-testid="tweet"][data-xrb-queued]:not([data-xrb-done])').forEach(art => {
-        const username = getUsernameFromArticle(art);
-        if (!username) return;
-        if (!memCache.has(username) && !pendingUsernames.has(username)) {
-          delete art.dataset.xrbQueued;
-          queueLookup(username);
-        }
-      });
-
- 
-      if (Date.now() >= rateLimitedUntil && lookupQueue.length > 0 && !queueRunning) {
-        console.log('[XRB] Rate limit lifted, resuming queue of', lookupQueue.length);
-        drainQueue();
-      }
-    }, 2000);
-  }
-
-
-  function checkAboutPopup(root) {
-    const text = root?.innerText || root?.textContent || '';
-    const match = text.match(/[Aa]ccount\s+based\s+in\s+([^\n\r,<]{2,50})/);
-    if (!match) return;
-    const country = match[1].trim();
-    if (!isBlocked(country)) return;
-    console.log('[XRB] About popup detected:', country);
-    const pageM = window.location.pathname.match(/^\/([A-Za-z0-9_]+)/);
-    if (pageM && !SKIP.has(pageM[1].toLowerCase())) cacheResult(pageM[1].toLowerCase(), country);
+      return (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+
+  // ── cache.js ──
+  const pendingDisk = new Map();
+  let diskTimer = null;
+  let refreshTimer = null;
+  let fullRefreshTimer = null;
+
+  async function loadDiskCache() {
+      try {
+          const stored = await chrome.storage.local.get([CACHE_KEY, TEMPLATE_KEY]);
+          const raw = stored[CACHE_KEY] || {};
+          const now = Date.now();
+          let loaded = 0;
+          for (const [username, entry] of Object.entries(raw)) {
+              const ttl = entry.country ? CACHE_TTL : NEG_TTL;
+              if (now - entry.ts < ttl) { memCache.set(username, entry); loaded++; }
+          }
+          const t = stored[TEMPLATE_KEY];
+          if (t && t.hash) {
+              aboutTemplate.hash = t.hash;
+              aboutTemplate.features = t.features || null;
+              aboutTemplate.fieldToggles = t.fieldToggles || null;
+          }
+          console.log('[XRB] Cache loaded:', loaded, 'entries');
+      } catch (e) { }
+  }
+
+  function saveTemplate() {
+      try { chrome.storage.local.set({ [TEMPLATE_KEY]: { ...aboutTemplate } }); } catch (e) { }
+  }
+
+  // Writes are batched: one read-modify-write per 3s instead of one per lookup
+  function saveToDiskCache(username, country, src) {
+      pendingDisk.set(username, { country: country || '', ts: Date.now(), src: src || 'about' });
+      if (!diskTimer) diskTimer = setTimeout(flushDiskCache, 3000);
+  }
+
+  async function flushDiskCache() {
+      diskTimer = null;
+      if (!pendingDisk.size) return;
+      const batch = [...pendingDisk];
+      pendingDisk.clear();
+      try {
+          const stored = await chrome.storage.local.get(CACHE_KEY);
+          let raw = stored[CACHE_KEY] || {};
+          for (const [u, e] of batch) raw[u] = e;
+          if (Object.keys(raw).length > 8000) {
+              raw = Object.fromEntries(Object.entries(raw).sort((a, b) => b[1].ts - a[1].ts).slice(0, 6000));
+          }
+          await chrome.storage.local.set({ [CACHE_KEY]: raw });
+      } catch (e) { }
+  }
+
+  function cacheResult(username, country, src) {
+      const lower = username.toLowerCase();
+      memCache.set(lower, { country: country || '', ts: Date.now(), src: src || 'about' });
+      saveToDiskCache(lower, country, src);
+      scheduleRefresh();
+  }
+
+  // Cheap, debounced: apply treatments to new matches + refresh region labels
+  function scheduleRefresh() {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+          if (blockedRegions.length) rescanDOM();
+          decorateWithin(document.body);
+          checkProfilePage();
+      }, 120);
+  }
+
+  // Heavier: used when an account's exemption status flips (e.g. we learn you follow each other)
+  function scheduleFullRefresh() {
+      clearTimeout(fullRefreshTimer);
+      fullRefreshTimer = setTimeout(() => {
+          clearVisualTreatments();
+          scanAll();
+          decorateWithin(document.body);
+          checkProfilePage();
+      }, 300);
+  }
+
+
+  // ── api.js ──
+  let lastDiscoveryAt = 0;
+
+  // Fallback only: normally the hash/feature flags are copied from X's own AboutAccountQuery traffic
+  async function discoverQueryHash() {
+      if (Date.now() - lastDiscoveryAt < 10 * 60 * 1000) return;
+      lastDiscoveryAt = Date.now();
+      try {
+          const scripts = [...document.querySelectorAll('script[src]')]
+              .filter(s => /\/(main|api)\.[^/]*\.js/.test(s.src)).slice(0, 4);
+          for (const script of scripts) {
+              const res = await fetch(script.src);
+              if (!res.ok) continue;
+              const text = await res.text();
+              const m = text.match(/queryId:\s*["']([A-Za-z0-9_-]{16,})["']\s*,\s*operationName:\s*["']AboutAccountQuery["']/)
+                  || text.match(/operationName:\s*["']AboutAccountQuery["']\s*,[^}]{0,80}queryId:\s*["']([A-Za-z0-9_-]{16,})["']/);
+              if (m && m[1]) {
+                  aboutTemplate.hash = m[1];
+                  saveTemplate();
+                  console.log('[XRB] Discovered AboutAccountQuery hash:', m[1]);
+                  return;
+              }
+          }
+      } catch (e) { }
+  }
+
+  function getCsrfToken() {
+      const match = document.cookie.match(/ct0=([^;]+)/);
+      return match ? match[1] : '';
+  }
+
+  function isAboutOpen() {
+      if (/^\/[^/]+\/about\/?$/.test(window.location.pathname)) return true;
+      const dlg = document.querySelector('[role="dialog"]');
+      return !!(dlg && /account\s+based\s+in|about\s+this\s+account/i.test(dlg.textContent || ''));
+  }
+
+  // Never compete with X's own About screen / background tabs / active rate limits
+  function lookupsPaused() {
+      const now = Date.now();
+      return now < rateLimitedUntil || now - nativeAboutAt < 20000 || document.hidden || isAboutOpen();
+  }
+
+  function ingestUserResult(username, result) {
+      const rp = result?.relationship_perspectives || {};
+      const following = rp.following ?? result?.legacy?.following;
+      const followedBy = rp.followed_by ?? result?.legacy?.followed_by;
+      if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
+          if (updateRel(username, following, followedBy)) scheduleFullRefresh();
+      }
+  }
+
+  async function lookupViaGraphQL(lower) {
+      if (lookupsPaused()) return null;
+
+      const cached = memCache.get(lower);
+      if (cached) {
+          const ttl = cached.country ? CACHE_TTL : NEG_TTL;
+          if (Date.now() - cached.ts < ttl) return cached.country || null;
+      }
+      if (pendingUsernames.has(lower) || activeRequests >= MAX_CONCURRENT) return null;
+
+      pendingUsernames.add(lower);
+      activeRequests++;
+      try {
+          const features = aboutTemplate.features || JSON.stringify({
+              hidden_profile_subscriptions_enabled: true,
+              responsive_web_graphql_exclude_directive_enabled: true,
+              verified_phone_label_enabled: false
+          });
+          let url = `https://x.com/i/api/graphql/${aboutTemplate.hash}/AboutAccountQuery`
+              + `?variables=${encodeURIComponent(JSON.stringify({ screenName: lower }))}`
+              + `&features=${encodeURIComponent(features)}`;
+          if (aboutTemplate.fieldToggles) url += `&fieldToggles=${encodeURIComponent(aboutTemplate.fieldToggles)}`;
+
+          const res = await fetch(url, {
+              headers: {
+                  'authorization': `Bearer ${BEARER}`,
+                  'x-csrf-token': getCsrfToken(),
+                  'x-twitter-active-user': 'yes',
+                  'x-twitter-auth-type': 'OAuth2Session',
+                  'x-twitter-client-language': 'en'
+              },
+              credentials: 'include'
+          });
+
+          if (res.status === 429) {
+              backoffMs = Math.min(backoffMs * 2, MAX_BACKOFF);
+              rateLimitedUntil = Date.now() + 15 * 60 * 1000;
+              console.log('[XRB] 429 — lookups paused until', new Date(rateLimitedUntil).toLocaleTimeString());
+              return null;
+          }
+          if (res.status === 401 || res.status === 403) {
+              rateLimitedUntil = Date.now() + 5 * 60 * 1000;      // transient: don't poison the cache
+              return null;
+          }
+          if (res.status === 400 || res.status === 404) {
+              discoverQueryHash();                                  // stale hash after an X deploy; ONE retry path, throttled
+              return null;
+          }
+          if (!res.ok) return null;
+
+          const data = await res.json();
+          const result = data?.data?.user_result_by_screen_name?.result || data?.data?.user?.result;
+          if (!result) { cacheResult(lower, ''); return null; }    // suspended / not found
+
+          ingestUserResult(lower, result);
+          const country = result?.about_profile?.account_based_in || '';
+          console.log('[XRB] Lookup:', lower, '->', country || '(none)');
+          backoffMs = Math.max(BASE_INTERVAL, backoffMs * 0.85);
+          cacheResult(lower, country, 'about');
+          return country || null;
+      } catch (e) {
+          return null;
+      } finally {
+          activeRequests--;
+          pendingUsernames.delete(lower);
+      }
+  }
+
+  function queueLookup(username) {
+      const lower = (username || '').toLowerCase();
+      if (!lower || SKIP.has(lower)) return;
+      if (!blockedRegions.length && !showLabels) return;           // nothing needs the data
+      if (memCache.has(lower) || pendingUsernames.has(lower) || lookupQueueSet.has(lower)) return;
+      if (Date.now() < rateLimitedUntil) return;
+      if (lookupQueue.length >= MAX_QUEUE_SIZE) {                  // drop the OLDEST (probably scrolled past)
+          const old = lookupQueue.shift();
+          lookupQueueSet.delete(old);
+      }
+      lookupQueue.push(lower);
+      lookupQueueSet.add(lower);
+      if (!queueRunning) drainQueue();
+  }
+
+  async function drainQueue() {
+      if (queueRunning) return;
+      queueRunning = true;
+      try {
+          while (lookupQueue.length > 0) {
+              if (lookupsPaused()) break;                          // interval scan resumes us
+              if (activeRequests >= MAX_CONCURRENT) { await sleep(300); continue; }
+              const username = lookupQueue.pop();                  // newest first = what's on screen now
+              if (!username) continue;
+              lookupQueueSet.delete(username);
+              if (memCache.has(username)) continue;
+              await lookupViaGraphQL(username);
+              await sleep(backoffMs + Math.random() * 800);       // jitter
+          }
+      } finally {
+          queueRunning = false;
+      }
+  }
+
+
+  // ── ui.js ──
+  function applyThemeStyle() {
+      let styleEl = document.getElementById('xrb-theme-style');
+      if (!styleEl) {
+          styleEl = document.createElement('style');
+          styleEl.id = 'xrb-theme-style';
+          document.head.appendChild(styleEl);
+      }
+      const hex = themeColor.replace('#', '');
+      let r = parseInt(hex.substring(0, 2), 16);
+      let g = parseInt(hex.substring(2, 4), 16);
+      let b = parseInt(hex.substring(4, 6), 16);
+      if (isNaN(r)) r = 255;
+      if (isNaN(g)) g = 34;
+      if (isNaN(b)) b = 34;
+      const rgb = `${r},${g},${b}`;
+
+      styleEl.textContent = `
+      .xrb-red-circle {
+        border-color: ${themeColor} !important;
+        box-shadow: 0 0 0 2px rgba(${rgb}, 0.35) !important;
+      }
+      .xrb-red-circle::after { background: ${themeColor} !important; }
+      .xrb-banner {
+        background: linear-gradient(90deg, rgba(${rgb}, 0.12), rgba(${rgb}, 0.05)) !important;
+        border-left-color: ${themeColor} !important;
+        border-bottom-color: rgba(${rgb}, 0.2) !important;
+        color: ${themeColor} !important;
+      }
+      .xrb-region-label { color: ${labelColor} !important; border-color: ${labelColor} !important; }
+      .xrb-region-label--blocked { color: ${themeColor} !important; border-color: ${themeColor} !important; }
+      @keyframes xrb-pulse {
+        0%,100% { box-shadow: 0 0 0 2px rgba(${rgb}, 0.35); }
+        50%      { box-shadow: 0 0 0 4px rgba(${rgb}, 0.55); }
+      }
+    `;
+  }
+
+  function detectOwnUsername() {
+      const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+      const m = a && (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]+)/);
+      if (m) ownUsername = m[1].toLowerCase();
+  }
+
+  // ───────────────────────── Treatments ─────────────────────────
+
+  function applyTreatment(article, locationText) {
+      if (article.dataset.xrbTreated) return;
+      article.dataset.xrbTreated = 'true';
+
+      if (blockMode === 'hide') {
+          article.style.display = 'none';
+          return;
+      }
+      if (blockMode === 'blur') {
+          article.style.filter = 'blur(7px)';
+          article.style.opacity = '0.3';
+          article.style.pointerEvents = 'none';
+          return;
+      }
+
+      const tweetCell = article.querySelector('[data-testid="tweet"]') || article;
+      tweetCell.style.position = 'relative';
+
+      const avatar = article.querySelector('img[src*="profile_images"]');
+      if (avatar) {
+          const wrap = avatar.closest('a') || avatar.parentElement;
+          if (wrap && !wrap.dataset.xrbCircle) {
+              wrap.style.cssText += 'position:relative!important;display:inline-block!important;z-index:9998!important;';
+              const circle = document.createElement('div');
+              circle.className = 'xrb-red-circle';
+              circle.title = `Blocked: ${locationText}`;
+              wrap.appendChild(circle);
+              wrap.dataset.xrbCircle = 'true';
+          }
+      }
+
+      if (!tweetCell.querySelector('.xrb-overlay')) {
+          const overlay = document.createElement('div');
+          overlay.className = 'xrb-overlay';
+          overlay.style.cssText = [
+              'position:absolute!important', 'top:0!important', 'left:0!important',
+              'width:100%!important', 'height:100%!important',
+              'background:rgba(0,0,0,0.90)!important', 'z-index:9990!important',
+              'pointer-events:none!important', 'display:flex!important',
+              'flex-direction:column!important', 'align-items:center!important',
+              'justify-content:center!important', 'gap:6px!important',
+              'border-radius:inherit!important',
+          ].join(';');
+          overlay.innerHTML = `
+        <div style="width:30px;height:30px;border-radius:50%;border:3px solid ${themeColor};position:relative;flex-shrink:0;">
+          <div style="position:absolute;top:50%;left:50%;width:130%;height:3px;background:${themeColor};transform:translate(-50%,-50%) rotate(-45deg);border-radius:2px;"></div>
+        </div>
+        <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.7);letter-spacing:0.08em;text-transform:uppercase;font-family:-apple-system,sans-serif;">Blocked</span>
+        <span style="font-size:12px;color:${themeColor};font-weight:500;font-family:-apple-system,sans-serif;">${escapeHtml(locationText)}</span>
+      `;
+          tweetCell.appendChild(overlay);
+      }
+  }
+
+  function checkProfilePage() {
+      const pageMatch = window.location.pathname.match(/^\/([A-Za-z0-9_]+)(?:\/|$)/);
+      if (!pageMatch) return;
+      const username = pageMatch[1].toLowerCase();
+      if (SKIP.has(username)) return;
+
+      if (isUserBlocked(username)) {
+          applyProfileBlock(username);
+      } else if (!memCache.has(username) && !pendingUsernames.has(username)) {
+          queueLookup(username);
+      }
+  }
+
+  function applyProfileBlock(username) {
+      const country = blockReason(username) || 'blocked region';
+
+      const avatarSelectors = [
+          '[data-testid="UserProfileHeader_Items"] ~ * a[href$="/photo"] img[src*="profile_images"]',
+          'a[href$="/photo"] img[src*="profile_images"]',
+          'a[href*="/photo"] img[src*="profile_images"]',
+          '[data-testid="UserAvatar"] img[src*="profile_images"]',
+          'img[src*="profile_images"][alt]:not([src*="_normal"])',
+      ];
+      let profileAvatar = null;
+      for (const sel of avatarSelectors) {
+          profileAvatar = document.querySelector(sel);
+          if (profileAvatar) break;
+      }
+
+      if (profileAvatar) {
+          const wrap = profileAvatar.closest('a, [data-testid="UserAvatar"]') || profileAvatar.parentElement;
+          if (wrap && !wrap.dataset.xrbProfileCircle) {
+              wrap.style.cssText += 'position:relative!important;display:inline-block!important;';
+              wrap.dataset.xrbProfileCircle = 'true';
+
+              const noSymbol = document.createElement('div');
+              noSymbol.className = 'xrb-profile-no-symbol';
+              noSymbol.title = `Blocked: ${country}`;
+              noSymbol.style.cssText = [
+                  'position:absolute!important', 'inset:0!important', 'border-radius:50%!important',
+                  'border:4px solid ' + themeColor + '!important', 'z-index:9999!important',
+                  'pointer-events:none!important', 'box-sizing:border-box!important',
+                  'animation:xrb-pulse 2s ease-in-out infinite!important',
+              ].join(';');
+
+              const slash = document.createElement('div');
+              slash.style.cssText = [
+                  'position:absolute!important', 'top:50%!important', 'left:50%!important',
+                  'width:135%!important', 'height:4px!important', 'background:' + themeColor + '!important',
+                  'transform:translate(-50%,-50%) rotate(-45deg)!important', 'border-radius:2px!important',
+              ].join(';');
+              noSymbol.appendChild(slash);
+              wrap.appendChild(noSymbol);
+
+              const tint = document.createElement('div');
+              tint.className = 'xrb-profile-no-symbol';
+              tint.style.cssText = [
+                  'position:absolute!important', 'inset:0!important', 'border-radius:50%!important',
+                  'background:rgba(0,0,0,0.45)!important', 'z-index:9998!important', 'pointer-events:none!important',
+              ].join(';');
+              wrap.appendChild(tint);
+          }
+      }
+
+      if (!document.querySelector('.xrb-profile-banner')) {
+          const headerItems = document.querySelector('[data-testid="UserProfileHeader_Items"]');
+          if (headerItems) {
+              const banner = document.createElement('div');
+              banner.className = 'xrb-banner xrb-profile-banner';
+              banner.style.cssText = 'margin:8px 0;border-radius:0;';
+              banner.innerHTML = `<span class="xrb-banner-icon">🚫</span><span class="xrb-banner-text">Blocked region: <strong>${escapeHtml(country)}</strong></span>`;
+              headerItems.parentElement.insertBefore(banner, headerItems);
+          }
+      }
+  }
+
+  // ───────────────────────── Region labels ─────────────────────────
+  // Works anywhere an "@handle" is rendered: timeline, replies, profile header, follower lists,
+  // search, hover cards, notifications and the DM inbox/thread header.
+
+  let handleIO = null;
+  function getHandleIO() {
+      if (handleIO) return handleIO;
+      handleIO = new IntersectionObserver(entries => {
+          entries.forEach(e => {
+              if (!e.isIntersecting) return;
+              handleIO.unobserve(e.target);
+              delete e.target.dataset.xrbIo;                      // allow re-observe if the lookup got dropped
+              const m = HANDLE_RE.exec((e.target.textContent || '').trim());
+              if (m && !memCache.has(m[1].toLowerCase())) queueLookup(m[1]);
+          });
+      }, { rootMargin: '200px 0px' });
+      return handleIO;
+  }
+
+  // Only X's real "Account based in" value is ever displayed
+  function labelInfo(u) {
+      const e = memCache.get(u);
+      return e && e.country ? { text: e.country } : null;
+  }
+
+  const labelOf = new WeakMap();   // handle <span> -> its label element
+
+  // Put the label in the same flex ROW as the handle (so it sits beside it, not under it):
+  // climb from the handle until the parent is a row-direction flex container.
+  function placeLabel(span, label) {
+      let el = span.closest('a') || span;
+      for (let i = 0; i < 5 && el.parentElement; i++) {
+          const p = el.parentElement;
+          const cs = getComputedStyle(p);
+          if (cs.display.includes('flex') && cs.flexDirection.startsWith('row')) {
+              el.insertAdjacentElement('afterend', label);
+              return;
+          }
+          if (p.matches('[data-testid="User-Name"], [data-testid="UserName"], article')) break;
+          el = p;
+      }
+      (span.closest('a') || span).insertAdjacentElement('afterend', label);
+  }
+
+  function decorateHandleEl(span) {
+      const txt = span.textContent;
+      if (!txt || txt.length > 16 || txt.charCodeAt(0) !== 64) return;
+      const m = HANDLE_RE.exec(txt.trim());
+      if (!m) return;
+      const u = m[1].toLowerCase();
+      if (SKIP.has(u)) return;
+
+      const info = labelInfo(u);
+      if (!info) {
+          if (!span.dataset.xrbIo) { span.dataset.xrbIo = '1'; getHandleIO().observe(span); }
+          return;
+      }
+
+      if (!span.parentElement) return;
+      let label = labelOf.get(span);
+      if (!label || !label.isConnected) {
+          label = document.createElement('span');
+          label.className = 'xrb-region-label';
+          labelOf.set(span, label);
+          placeLabel(span, label);
+      }
+      const shown = info.text.length > 28 ? info.text.slice(0, 27) + '…' : info.text;
+      const text = '📍 ' + shown;
+      if (label.textContent !== text) label.textContent = text;
+      label.dataset.user = u;
+      label.title = `Account based in: ${info.text}`;
+      label.classList.toggle('xrb-region-label--blocked', isUserBlocked(u));
+  }
+
+  function decorateWithin(root) {
+      if (!showLabels || !root || root.nodeType !== 1) return;
+      if (root.matches && root.matches('div[dir="ltr"] > span')) decorateHandleEl(root);
+      root.querySelectorAll('div[dir="ltr"] > span').forEach(decorateHandleEl);
+  }
+
+  // ───────────────────────── Article processing ─────────────────────────
+
+  function getUsernamesFromArticle(article) {
+      const names = new Set();
+      const add = href => {
+          const m = (href || '').match(/^\/([A-Za-z0-9_]{1,15})(?:\/|\?|$)/);
+          if (m && !SKIP.has(m[1].toLowerCase())) names.add(m[1].toLowerCase());
+      };
+      // Authors (tweet + quoted tweet), reposter line, and avatars (covers notifications: likers, followers…).
+      // Deliberately NOT every link in the post — @mentions in the text no longer count.
+      article.querySelectorAll(
+          '[data-testid="User-Name"] a[href^="/"], [data-testid="UserName"] a[href^="/"], [data-testid="socialContext"] a[href^="/"]'
+      ).forEach(a => add(a.getAttribute('href')));
+      article.querySelectorAll('a[href^="/"] img[src*="profile_images"]').forEach(img => {
+          const a = img.closest('a');
+          if (a) add(a.getAttribute('href'));
+      });
+      return Array.from(names);
+  }
+
+  function getPrimaryAuthor(article) {
+      const a = article.querySelector('[data-testid="User-Name"] a[href^="/"]');
+      const m = a && (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]{1,15})(?:\/|\?|$)/);
+      return m ? m[1].toLowerCase() : '';
+  }
+
+  function getTweetIdsFromArticle(article) {
+      const timeLink = article.querySelector('a[href*="/status/"] time');
+      const primary = timeLink && timeLink.closest('a');
+      const pm = primary && primary.getAttribute('href').match(/\/status\/(\d+)/);
+      if (pm) return [pm[1]];                                      // the post itself, not a quoted one
+      const ids = new Set();
+      article.querySelectorAll('a[href*="/status/"]').forEach(link => {
+          const m = link.getAttribute('href').match(/\/status\/(\d+)/);
+          if (m) ids.add(m[1]);
+      });
+      return Array.from(ids);
+  }
+
+  const DOM_AFF_URL_RE = /(?:^|[/.])(?:amzn\.(?:to|eu|asia)|a\.co|s\.click\.aliexpress\.com|shope\.ee|linksynergy\.com|shareasale\.com|awin1\.com|hop\.clickbank\.net|go\.skimresources\.com|prf\.hn|tidd\.ly|geni\.us)(?:[/?]|$)/i;
+  const DOM_AFF_PARAM_RE = /[?&](?:aff|aff_id|affid|affiliate|affiliate_id|cjevent|irclickid)=|[?&]utm_medium=affiliate|amazon\.[a-z.]+\/\S*[?&]tag=/i;
+  const DOM_AFF_TEXT_RE = /#(?:ad|affiliate|sponsored|paidpartnership|commissionearned)\b|affiliate links?|commission (?:earned|link)/i;
+
+  // Fallback when the API payload wasn't seen (e.g. cached/prefetched responses)
+  function domLooksAffiliate(article) {
+      const textEl = article.querySelector('[data-testid="tweetText"]');
+      if (textEl && DOM_AFF_TEXT_RE.test(textEl.textContent || '')) return true;
+      const links = article.querySelectorAll('[data-testid="tweetText"] a, [data-testid="card.wrapper"] a');
+      for (const a of links) {
+          const shown = a.textContent || '';
+          const href = a.getAttribute('href') || '';
+          if (DOM_AFF_URL_RE.test(shown) || DOM_AFF_PARAM_RE.test(shown) || DOM_AFF_URL_RE.test(href) || DOM_AFF_PARAM_RE.test(href)) return true;
+      }
+      return false;
+  }
+
+  function affiliateVerdict(article) {
+      if (!blockAffiliate && !blockAffiliated) return null;
+      const author = getPrimaryAuthor(article);
+      if (author && isExempt(author)) return null;                 // mutuals are never affiliate-blocked either
+
+      if (blockAffiliate) {
+          if (getTweetIdsFromArticle(article).some(id => affiliateTweetIds.has(id))) return 'Affiliate Post';
+          if (domLooksAffiliate(article)) return 'Affiliate Post';
+          if (author && (affiliateUserCounts.get(author) || 0) >= AFFILIATE_USER_THRESHOLD) return 'Affiliate Account';
+      }
+      if (blockAffiliated && author && affiliatedUsers.has(author)) return 'Affiliated Account';
+      return null;
+  }
+
+  function processArticle(article) {
+      if (article.dataset.xrbTreated) return;
+      decorateWithin(article);
+
+      const verdict = affiliateVerdict(article);
+      if (verdict) { applyTreatment(article, verdict); return; }
+
+      if (article.dataset.xrbProcessed) return;
+      const usernames = getUsernamesFromArticle(article);
+      if (!usernames.length) return;
+
+      let unknown = false;
+      for (const u of usernames) {
+          const why = blockReason(u);
+          if (why) { applyTreatment(article, why); return; }
+          if (!memCache.has(u)) { unknown = true; queueLookup(u); }
+      }
+      // On notifications/inbox we keep re-checking until relationship data arrives
+      if (!unknown && !SENSITIVE_PATH.test(window.location.pathname)) article.dataset.xrbProcessed = 'true';
+  }
+
+  function rescanDOM() {
+      document.querySelectorAll(ARTICLE_SEL).forEach(art => {
+          if (art.dataset.xrbTreated) return;
+
+          const verdict = affiliateVerdict(art);
+          if (verdict) { applyTreatment(art, verdict); return; }
+
+          if (art.dataset.xrbProcessed) return;
+          for (const u of getUsernamesFromArticle(art)) {
+              const why = blockReason(u);
+              if (why) { applyTreatment(art, why); return; }
+          }
+      });
+  }
+
+  function scanAll() {
+      document.querySelectorAll(ARTICLE_SEL).forEach(processArticle);
+  }
+
+  function clearVisualTreatments() {
+      document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label').forEach(el => el.remove());
+      document.querySelectorAll('[data-xrb-circle], [data-xrb-profile-circle]').forEach(el => {
+          delete el.dataset.xrbCircle;
+          delete el.dataset.xrbProfileCircle;
+      });
+      document.querySelectorAll(ARTICLE_SEL).forEach(el => {
+          el.style.filter = '';
+          el.style.opacity = '';
+          el.style.display = '';
+          el.style.pointerEvents = '';
+          delete el.dataset.xrbProcessed;
+          delete el.dataset.xrbTreated;
+      });
+  }
+
+
+  // ── observers.js ──
+  const decorateBuf = new Set();
+  let decorateTimer = null;
+
+  function scheduleDecorate(node) {
+      decorateBuf.add(node);
+      if (decorateTimer) return;
+      decorateTimer = setTimeout(() => {
+          decorateTimer = null;
+          const nodes = [...decorateBuf];
+          decorateBuf.clear();
+          nodes.forEach(n => { if (n.isConnected) decorateWithin(n); });
+      }, 150);
+  }
+
+  function isOwnNode(node) {
+      const c = node.classList;
+      return !!c && (c.contains('xrb-region-label') || c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
+          c.contains('xrb-banner') || c.contains('xrb-profile-no-symbol'));
+  }
+
+  function startObserver() {
+      new MutationObserver(mutations => {
+          const newArticles = [];
+
+          mutations.forEach(m => {
+              m.addedNodes.forEach(node => {
+                  if (node.nodeType !== 1 || isOwnNode(node)) return;
+                  if (node.matches?.(ARTICLE_SEL)) newArticles.push(node);
+                  node.querySelectorAll?.(ARTICLE_SEL).forEach(a => newArticles.push(a));
+                  if (node.matches?.('[role="dialog"]')) setTimeout(() => checkAboutPopup(node), 400);
+                  scheduleDecorate(node);
+              });
+          });
+
+          if (lastPath !== window.location.pathname) {
+              lastPath = window.location.pathname;
+              console.log('[XRB] Navigation to:', lastPath);
+              document.querySelectorAll('.xrb-profile-banner, .xrb-profile-no-symbol').forEach(el => el.remove());
+              document.querySelectorAll('[data-xrb-profile-circle]').forEach(el => delete el.dataset.xrbProfileCircle);
+              setTimeout(checkProfilePage, 800);
+              setTimeout(scanAll, 300);
+              setTimeout(scanAll, 1200);
+          }
+
+          if (newArticles.length) {
+              clearTimeout(window._xrbObsTimer);
+              window._xrbObsTimer = setTimeout(() => newArticles.forEach(a => a.isConnected && processArticle(a)), 150);
+          }
+      }).observe(document.body, { childList: true, subtree: true });
+
+      lastPath = window.location.pathname;
+  }
+
+  function startIntersectionObserver() {
+      const io = new IntersectionObserver(entries => {
+          entries.forEach(entry => {
+              if (!entry.isIntersecting) return;
+              const art = entry.target;
+              if (!art.dataset.xrbProcessed && !art.dataset.xrbTreated) processArticle(art);
+          });
+      }, { rootMargin: '500px 0px', threshold: 0 });
+
+      function observe() {
+          document.querySelectorAll(ARTICLE_SEL).forEach(art => {
+              if (!art.dataset.xrbObserved) { art.dataset.xrbObserved = 'true'; io.observe(art); }
+          });
+      }
+      observe();
+      new MutationObserver(observe).observe(document.body, { childList: true, subtree: true });
+  }
+
+  // Articles that are on screen but still unresolved (lookup dropped / paused) get re-queued
+  function retryVisibleArticles() {
+      const h = window.innerHeight + 300;
+      document.querySelectorAll(ARTICLE_SEL).forEach(art => {
+          if (art.dataset.xrbTreated || art.dataset.xrbProcessed) return;
+          const r = art.getBoundingClientRect();
+          if (r.bottom > -300 && r.top < h) processArticle(art);
+      });
+  }
+
+  function startIntervalScan() {
+      let tick = 0;
+      setInterval(() => {
+          tick++;
+          detectOwnUsername();
+          if (blockedRegions.length || blockAffiliate || blockAffiliated) rescanDOM();
+          checkProfilePage();
+          checkAboutPage();
+
+          if (tick % 2 === 0) retryVisibleArticles();
+          if (tick % 2 === 1) decorateWithin(document.body);
+
+          if (lookupQueue.length > 0 && !queueRunning && !lookupsPaused()) drainQueue();
+      }, 1500);
+  }
+
+  // Learn passively from X's own About UI — no request of ours needed
+  function checkAboutPopup(root) {
+      const text = root?.innerText || root?.textContent || '';
+      const match = text.match(/[Aa]ccount\s+based\s+in\s+([^\n\r,<]{2,50})/);
+      if (!match) return;
+      nativeAboutAt = Date.now();
+      const pageM = window.location.pathname.match(/^\/([A-Za-z0-9_]+)/);
+      if (pageM && !SKIP.has(pageM[1].toLowerCase())) cacheResult(pageM[1].toLowerCase(), match[1].trim(), 'about');
+  }
+
+  function checkAboutPage() {
+      const m = window.location.pathname.match(/^\/([A-Za-z0-9_]+)\/about\/?$/);
+      if (!m) return;
+      nativeAboutAt = Date.now();
+      const col = document.querySelector('[data-testid="primaryColumn"]');
+      const t = col && (col.innerText || '').match(/[Aa]ccount\s+based\s+in\s*\n?\s*([^\n\r<]{2,50})/);
+      if (t && !memCache.has(m[1].toLowerCase())) cacheResult(m[1].toLowerCase(), t[1].trim(), 'about');
+  }
+
+
+  // ── main.js ──
+  function loadSettings(cb) {
+      chrome.storage.sync.get(
+          ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor'],
+          data => {
+              blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim()).filter(Boolean);
+              compileRegions();
+              blockMode = data.blockMode || 'overlay';
+              blockAffiliate = !!data.blockAffiliate;
+              blockAffiliated = !!data.blockAffiliated;
+              whitelistMode = data.whitelistMode || 'mutuals';
+              showLabels = data.showLabels !== false;
+              themeColor = data.themeColor || '#ff2222';
+              labelColor = data.labelColor || '#22c55e';
+              applyThemeStyle();
+              if (cb) cb();
+          });
+  }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync') return;
+      const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor'];
+      if (!keys.some(k => changes[k])) return;
+      loadSettings(() => {
+          pendingUsernames.clear();
+          clearVisualTreatments();
+          scanAll();
+          decorateWithin(document.body);
+          checkProfilePage();
+      });
+  });
+
+  function listenToInjector() {
+      window.addEventListener(CHANNEL, e => {
+          let msg = e.detail;
+          try { if (typeof msg === 'string') msg = JSON.parse(msg); } catch (_) { return; }
+          const { type, payload } = msg || {};
+          if (!type || !payload) return;
+
+          switch (type) {
+              case 'user_info': {
+                  const { username, location, following, followedBy, affiliated } = payload;
+                  if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
+                      if (updateRel(username, following, followedBy)) scheduleFullRefresh();
+                  }
+                  if (affiliated) affiliatedUsers.add(username);
+                  if (location) {
+                      // Free-text profile location: used ONLY as a blocking fallback, never displayed
+                      profileLoc.set(username, location);
+                      if (isBlocked(location) && !memCache.has(username)) scheduleRefresh();
+                  }
+                  scheduleDecorate(document.body);
+                  break;
+              }
+              case 'about_country':
+                  nativeAboutAt = Date.now();
+                  cacheResult(payload.username, payload.country, 'about');
+                  break;
+              case 'about_native':
+                  nativeAboutAt = Date.now();
+                  if (payload.status === 429) {
+                      rateLimitedUntil = Math.max(rateLimitedUntil, Date.now() + 10 * 60 * 1000);
+                      console.log('[XRB] X itself got 429 on About — pausing our lookups');
+                  }
+                  break;
+              case 'query_template':
+                  if (payload.hash) {
+                      aboutTemplate.hash = payload.hash;
+                      if (payload.features) aboutTemplate.features = payload.features;
+                      if (payload.fieldToggles) aboutTemplate.fieldToggles = payload.fieldToggles;
+                      saveTemplate();
+                  }
+                  break;
+              case 'affiliate_tweet': {
+                  const { tweetId, username } = payload;
+                  if (!affiliateTweetIds.has(tweetId)) {
+                      affiliateTweetIds.add(tweetId);
+                      if (username) affiliateUserCounts.set(username, (affiliateUserCounts.get(username) || 0) + 1);
+                      if (blockAffiliate) scheduleRefresh();
+                  }
+                  break;
+              }
+          }
+      });
+      // Tell the injector we're listening so it can replay what it buffered before we loaded
+      window.dispatchEvent(new CustomEvent(READY_EVENT));
+  }
+
+  async function init() {
+      await loadDiskCache();
+      loadSettings(() => {
+          detectOwnUsername();
+          listenToInjector();
+          startObserver();
+          startIntersectionObserver();
+          startIntervalScan();
+          if (!aboutTemplate.features) setTimeout(discoverQueryHash, 4000);
+
+          scanAll();
+          decorateWithin(document.body);
+          setTimeout(scanAll, 500);
+          setTimeout(scanAll, 1500);
+          setTimeout(scanAll, 3000);
+          setTimeout(checkProfilePage, 1000);
+          setTimeout(checkProfilePage, 2500);
+      });
+      console.log('[XRB] v1.1 ready');
+  }
+
   init();
+
 
 })();

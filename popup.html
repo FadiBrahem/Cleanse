@@ -419,7 +419,7 @@
       <img src="icons/icon128.png" width="20" height="20" style="display:block;" />
     </div>
     <div class="header-text">
-      <h1>Cleanse <span class="v-badge">v1.0</span></h1>
+      <h1>Cleanse <span class="v-badge">v1.1</span></h1>
       <p>API-Level Location & Affiliates Filtering</p>
     </div>
     <div class="status-dot" id="statusDot"></div>
@@ -460,10 +460,31 @@
         <div class="tags-empty" id="tagsEmpty">No regions added yet.</div>
         <div class="tags" id="tagsList"></div>
       </div>
-      <div style="margin-top: 12px; display: flex; align-items: center; gap: 8px;">
-        <input type="checkbox" id="blockAffiliateCheck" style="accent-color: var(--red); cursor: pointer;" />
-        <label for="blockAffiliateCheck" style="font-size: 11px; cursor: pointer; color: var(--text);">Block Affiliate
-          Content</label>
+      <div style="margin-top: 12px; display: flex; flex-direction: column; gap: 8px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;color:var(--text);">
+          <input type="checkbox" id="blockAffiliateCheck" style="accent-color: var(--red); cursor: pointer;" />
+          Block affiliate posts (links / #ad) &amp; repeat affiliate accounts
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;color:var(--text);">
+          <input type="checkbox" id="blockAffiliatedCheck" style="accent-color: var(--red); cursor: pointer;" />
+          Block accounts with an X "affiliated with" badge
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;color:var(--text);">
+          <input type="checkbox" id="showLabelsCheck" style="accent-color: var(--red); cursor: pointer;" />
+          Show region next to @handle everywhere
+        </label>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;color:var(--text-dim);">Region label color:</span>
+          <input type="color" id="labelColorInput" value="#22c55e" style="cursor:pointer;width:30px;height:24px;border:none;border-radius:4px;padding:0;background:transparent;" title="Color of the region label next to @handles" />
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;color:var(--text-dim);">Never block:</span>
+          <select id="whitelistSelect" style="flex:1;max-width:170px;padding:5px 6px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:11px;">
+            <option value="mutuals">Mutuals (follow each other)</option>
+            <option value="following">Everyone I follow</option>
+            <option value="none">Nobody (block all)</option>
+          </select>
+        </div>
       </div>
     </div>
 

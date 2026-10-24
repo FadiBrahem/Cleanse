@@ -1,42 +1,57 @@
-
-
 let blockedRegions = [];
 let blockMode = 'overlay';
 let blockAffiliate = false;
+let blockAffiliated = false;
+let whitelistMode = 'mutuals';
+let showLabels = true;
 let themeColor = '#ff2222';
+let labelColor = '#22c55e';
 
-const regionInput = document.getElementById('regionInput');
-const addBtn = document.getElementById('addBtn');
-const tagsList = document.getElementById('tagsList');
-const tagsEmpty = document.getElementById('tagsEmpty');
-const blockedCount = document.getElementById('blockedCount');
-const clearBtn = document.getElementById('clearBtn');
-const statusDot = document.getElementById('statusDot');
-const toast = document.getElementById('toast');
-const blockAffiliateCheck = document.getElementById('blockAffiliateCheck');
-const themeColorInput = document.getElementById('themeColorInput');
+const $ = id => document.getElementById(id);
+const regionInput = $('regionInput');
+const addBtn = $('addBtn');
+const tagsList = $('tagsList');
+const tagsEmpty = $('tagsEmpty');
+const blockedCount = $('blockedCount');
+const clearBtn = $('clearBtn');
+const statusDot = $('statusDot');
+const toast = $('toast');
+const blockAffiliateCheck = $('blockAffiliateCheck');
+const blockAffiliatedCheck = $('blockAffiliatedCheck');
+const showLabelsCheck = $('showLabelsCheck');
+const whitelistSelect = $('whitelistSelect');
+const themeColorInput = $('themeColorInput');
+const labelColorInput = $('labelColorInput');
 
 function saveAndSync() {
-  chrome.storage.sync.set({ blockedRegions, blockMode, blockAffiliate, themeColor });
+  chrome.storage.sync.set({ blockedRegions, blockMode, blockAffiliate, blockAffiliated, whitelistMode, showLabels, themeColor, labelColor });
   render();
 }
 
 function loadSettings() {
-  chrome.storage.sync.get(['blockedRegions', 'blockMode', 'blockAffiliate', 'themeColor'], (data) => {
-    blockedRegions = data.blockedRegions || [];
-    blockMode = data.blockMode || 'overlay';
-    blockAffiliate = !!data.blockAffiliate;
-    themeColor = data.themeColor || '#ff2222';
-    if (blockAffiliateCheck) blockAffiliateCheck.checked = blockAffiliate;
-    if (themeColorInput) themeColorInput.value = themeColor;
-    render();
-  });
+  chrome.storage.sync.get(
+    ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor'],
+    (data) => {
+      blockedRegions = data.blockedRegions || [];
+      blockMode = data.blockMode || 'overlay';
+      blockAffiliate = !!data.blockAffiliate;
+      blockAffiliated = !!data.blockAffiliated;
+      whitelistMode = data.whitelistMode || 'mutuals';
+      showLabels = data.showLabels !== false;
+      themeColor = data.themeColor || '#ff2222';
+      labelColor = data.labelColor || '#22c55e';
+      labelColorInput.value = labelColor;
+      blockAffiliateCheck.checked = blockAffiliate;
+      blockAffiliatedCheck.checked = blockAffiliated;
+      showLabelsCheck.checked = showLabels;
+      whitelistSelect.value = whitelistMode;
+      themeColorInput.value = themeColor;
+      render();
+    });
 }
 
 function render() {
-  document.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === blockMode);
-  });
+  document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.mode === blockMode));
 
   tagsList.innerHTML = '';
   if (blockedRegions.length === 0) {
@@ -52,9 +67,8 @@ function render() {
       tagsList.appendChild(tag);
     });
   }
-
   blockedCount.textContent = blockedRegions.length;
-  statusDot.classList.toggle('inactive', blockedRegions.length === 0);
+  statusDot.classList.toggle('inactive', blockedRegions.length === 0 && !blockAffiliate && !blockAffiliated);
 }
 
 function addRegion(value) {
@@ -88,29 +102,14 @@ function showToast(msg) {
   toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
 }
 
-addBtn.addEventListener('click', () => {
-  addRegion(regionInput.value);
-  regionInput.value = '';
-  regionInput.focus();
-});
-
-regionInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { addRegion(regionInput.value); regionInput.value = ''; }
-});
-
+addBtn.addEventListener('click', () => { addRegion(regionInput.value); regionInput.value = ''; regionInput.focus(); });
+regionInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { addRegion(regionInput.value); regionInput.value = ''; } });
 tagsList.addEventListener('click', (e) => {
   const btn = e.target.closest('.tag-remove');
   if (btn) removeRegion(parseInt(btn.dataset.idx, 10));
 });
-
-document.querySelectorAll('.mode-btn').forEach(btn => {
-  btn.addEventListener('click', () => { blockMode = btn.dataset.mode; saveAndSync(); });
-});
-
-document.querySelectorAll('.preset-btn').forEach(btn => {
-  btn.addEventListener('click', () => addRegion(btn.dataset.region));
-});
-
+document.querySelectorAll('.mode-btn').forEach(btn => btn.addEventListener('click', () => { blockMode = btn.dataset.mode; saveAndSync(); }));
+document.querySelectorAll('.preset-btn').forEach(btn => btn.addEventListener('click', () => addRegion(btn.dataset.region)));
 clearBtn.addEventListener('click', () => {
   if (blockedRegions.length === 0) return;
   blockedRegions = [];
@@ -118,19 +117,20 @@ clearBtn.addEventListener('click', () => {
   showToast('Cleared all regions');
 });
 
+blockAffiliateCheck.addEventListener('change', e => {
+  blockAffiliate = e.target.checked; saveAndSync();
+  showToast(blockAffiliate ? 'Affiliate blocking on' : 'Affiliate blocking off');
+});
+blockAffiliatedCheck.addEventListener('change', e => {
+  blockAffiliated = e.target.checked; saveAndSync();
+  showToast(blockAffiliated ? 'Affiliated-badge blocking on' : 'Affiliated-badge blocking off');
+});
+showLabelsCheck.addEventListener('change', e => {
+  showLabels = e.target.checked; saveAndSync();
+  showToast(showLabels ? 'Region labels on' : 'Region labels off');
+});
+whitelistSelect.addEventListener('change', e => { whitelistMode = e.target.value; saveAndSync(); });
+labelColorInput.addEventListener('input', e => { labelColor = e.target.value; saveAndSync(); });
+themeColorInput.addEventListener('input', e => { themeColor = e.target.value; saveAndSync(); });
+
 loadSettings();
-
-if (blockAffiliateCheck) {
-  blockAffiliateCheck.addEventListener('change', (e) => {
-    blockAffiliate = e.target.checked;
-    saveAndSync();
-    showToast(blockAffiliate ? 'Affiliate blocking enabled' : 'Affiliate blocking disabled');
-  });
-}
-
-if (themeColorInput) {
-  themeColorInput.addEventListener('input', (e) => {
-    themeColor = e.target.value;
-    saveAndSync();
-  });
-}

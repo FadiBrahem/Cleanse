@@ -4,20 +4,15 @@ const path = require('path');
 const srcDir = path.join(__dirname, 'src', 'content');
 const outPath = path.join(__dirname, 'content.js');
 
-const files = [
-    'state.js',
-    'cache.js',
-    'api.js',
-    'ui.js',
-    'observers.js',
-    'main.js'
-];
+const files = ['state.js', 'cache.js', 'api.js', 'ui.js', 'observers.js', 'main.js'];
 
-let out = `// Cleanse (X Region Blocker) v1.0
-// Built from modular src/
+let out = `// Cleanse (X Region Blocker) v1.1
+// Built from modular src/ — edit src/content/*.js, then run: node build.js
 
 (function () {
   'use strict';
+  if (window.__xrbContentLoaded) return;   // guard against double injection
+  window.__xrbContentLoaded = true;
 
 `;
 
@@ -28,6 +23,5 @@ for (const file of files) {
 }
 
 out += '})();\n';
-
 fs.writeFileSync(outPath, out);
 console.log('Build successful: content.js generated from src/content modules.');

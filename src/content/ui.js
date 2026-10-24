@@ -19,21 +19,29 @@ function applyThemeStyle() {
       border-color: ${themeColor} !important;
       box-shadow: 0 0 0 2px rgba(${rgb}, 0.35) !important;
     }
-    .xrb-red-circle::after {
-      background: ${themeColor} !important;
-    }
+    .xrb-red-circle::after { background: ${themeColor} !important; }
     .xrb-banner {
       background: linear-gradient(90deg, rgba(${rgb}, 0.12), rgba(${rgb}, 0.05)) !important;
       border-left-color: ${themeColor} !important;
       border-bottom-color: rgba(${rgb}, 0.2) !important;
       color: ${themeColor} !important;
     }
+    .xrb-region-label { color: ${labelColor} !important; border-color: ${labelColor} !important; }
+    .xrb-region-label--blocked { color: ${themeColor} !important; border-color: ${themeColor} !important; }
     @keyframes xrb-pulse {
-      0%,100% { box-shadow: 0 0 0 2px rgba(${rgb}, 0.35) !important; }
-      50%      { box-shadow: 0 0 0 4px rgba(${rgb}, 0.55) !important; }
+      0%,100% { box-shadow: 0 0 0 2px rgba(${rgb}, 0.35); }
+      50%      { box-shadow: 0 0 0 4px rgba(${rgb}, 0.55); }
     }
   `;
 }
+
+function detectOwnUsername() {
+    const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
+    const m = a && (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]+)/);
+    if (m) ownUsername = m[1].toLowerCase();
+}
+
+// ───────────────────────── Treatments ─────────────────────────
 
 function applyTreatment(article, locationText) {
     if (article.dataset.xrbTreated) return;
@@ -70,24 +78,19 @@ function applyTreatment(article, locationText) {
         const overlay = document.createElement('div');
         overlay.className = 'xrb-overlay';
         overlay.style.cssText = [
-            'position:absolute!important',
-            'top:0!important', 'left:0!important',
+            'position:absolute!important', 'top:0!important', 'left:0!important',
             'width:100%!important', 'height:100%!important',
-            'background:rgba(0,0,0,0.90)!important',
-            'z-index:9990!important',
-            'pointer-events:none!important',
-            'display:flex!important',
-            'flex-direction:column!important',
-            'align-items:center!important',
-            'justify-content:center!important',
-            'gap:6px!important',
+            'background:rgba(0,0,0,0.90)!important', 'z-index:9990!important',
+            'pointer-events:none!important', 'display:flex!important',
+            'flex-direction:column!important', 'align-items:center!important',
+            'justify-content:center!important', 'gap:6px!important',
             'border-radius:inherit!important',
         ].join(';');
         overlay.innerHTML = `
       <div style="width:30px;height:30px;border-radius:50%;border:3px solid ${themeColor};position:relative;flex-shrink:0;">
         <div style="position:absolute;top:50%;left:50%;width:130%;height:3px;background:${themeColor};transform:translate(-50%,-50%) rotate(-45deg);border-radius:2px;"></div>
       </div>
-      <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.7);letter-spacing:0.08em;text-transform:uppercase;font-family:-apple-system,sans-serif;">Blocked Region</span>
+      <span style="font-size:11px;font-weight:600;color:rgba(255,255,255,0.7);letter-spacing:0.08em;text-transform:uppercase;font-family:-apple-system,sans-serif;">Blocked</span>
       <span style="font-size:12px;color:${themeColor};font-weight:500;font-family:-apple-system,sans-serif;">${escapeHtml(locationText)}</span>
     `;
         tweetCell.appendChild(overlay);
@@ -95,14 +98,12 @@ function applyTreatment(article, locationText) {
 }
 
 function checkProfilePage() {
-    const pathname = window.location.pathname;
-    const pageMatch = pathname.match(/^\/([A-Za-z0-9_]+)(?:\/|$)/);
+    const pageMatch = window.location.pathname.match(/^\/([A-Za-z0-9_]+)(?:\/|$)/);
     if (!pageMatch) return;
-
     const username = pageMatch[1].toLowerCase();
     if (SKIP.has(username)) return;
 
-    if (blockedUsernames.has(username)) {
+    if (isUserBlocked(username)) {
         applyProfileBlock(username);
     } else if (!memCache.has(username) && !pendingUsernames.has(username)) {
         queueLookup(username);
@@ -110,8 +111,7 @@ function checkProfilePage() {
 }
 
 function applyProfileBlock(username) {
-    const entry = memCache.get(username);
-    const country = entry?.country || 'blocked region';
+    const country = blockReason(username) || 'blocked region';
 
     const avatarSelectors = [
         '[data-testid="UserProfileHeader_Items"] ~ * a[href$="/photo"] img[src*="profile_images"]',
@@ -120,7 +120,6 @@ function applyProfileBlock(username) {
         '[data-testid="UserAvatar"] img[src*="profile_images"]',
         'img[src*="profile_images"][alt]:not([src*="_normal"])',
     ];
-
     let profileAvatar = null;
     for (const sel of avatarSelectors) {
         profileAvatar = document.querySelector(sel);
@@ -137,36 +136,26 @@ function applyProfileBlock(username) {
             noSymbol.className = 'xrb-profile-no-symbol';
             noSymbol.title = `Blocked: ${country}`;
             noSymbol.style.cssText = [
-                'position:absolute!important',
-                'inset:0!important',
-                'border-radius:50%!important',
-                'border:4px solid ' + themeColor + '!important',
-                'z-index:9999!important',
-                'pointer-events:none!important',
-                'box-sizing:border-box!important',
+                'position:absolute!important', 'inset:0!important', 'border-radius:50%!important',
+                'border:4px solid ' + themeColor + '!important', 'z-index:9999!important',
+                'pointer-events:none!important', 'box-sizing:border-box!important',
                 'animation:xrb-pulse 2s ease-in-out infinite!important',
             ].join(';');
 
             const slash = document.createElement('div');
             slash.style.cssText = [
-                'position:absolute!important',
-                'top:50%!important', 'left:50%!important',
-                'width:135%!important', 'height:4px!important',
-                'background:' + themeColor + '!important',
-                'transform:translate(-50%,-50%) rotate(-45deg)!important',
-                'border-radius:2px!important',
+                'position:absolute!important', 'top:50%!important', 'left:50%!important',
+                'width:135%!important', 'height:4px!important', 'background:' + themeColor + '!important',
+                'transform:translate(-50%,-50%) rotate(-45deg)!important', 'border-radius:2px!important',
             ].join(';');
             noSymbol.appendChild(slash);
             wrap.appendChild(noSymbol);
 
             const tint = document.createElement('div');
+            tint.className = 'xrb-profile-no-symbol';
             tint.style.cssText = [
-                'position:absolute!important',
-                'inset:0!important',
-                'border-radius:50%!important',
-                'background:rgba(0,0,0,0.45)!important',
-                'z-index:9998!important',
-                'pointer-events:none!important',
+                'position:absolute!important', 'inset:0!important', 'border-radius:50%!important',
+                'background:rgba(0,0,0,0.45)!important', 'z-index:9998!important', 'pointer-events:none!important',
             ].join(';');
             wrap.appendChild(tint);
         }
@@ -184,147 +173,194 @@ function applyProfileBlock(username) {
     }
 }
 
+// ───────────────────────── Region labels ─────────────────────────
+// Works anywhere an "@handle" is rendered: timeline, replies, profile header, follower lists,
+// search, hover cards, notifications and the DM inbox/thread header.
+
+let handleIO = null;
+function getHandleIO() {
+    if (handleIO) return handleIO;
+    handleIO = new IntersectionObserver(entries => {
+        entries.forEach(e => {
+            if (!e.isIntersecting) return;
+            handleIO.unobserve(e.target);
+            delete e.target.dataset.xrbIo;                      // allow re-observe if the lookup got dropped
+            const m = HANDLE_RE.exec((e.target.textContent || '').trim());
+            if (m && !memCache.has(m[1].toLowerCase())) queueLookup(m[1]);
+        });
+    }, { rootMargin: '200px 0px' });
+    return handleIO;
+}
+
+// Only X's real "Account based in" value is ever displayed
+function labelInfo(u) {
+    const e = memCache.get(u);
+    return e && e.country ? { text: e.country } : null;
+}
+
+const labelOf = new WeakMap();   // handle <span> -> its label element
+
+// Put the label in the same flex ROW as the handle (so it sits beside it, not under it):
+// climb from the handle until the parent is a row-direction flex container.
+function placeLabel(span, label) {
+    let el = span.closest('a') || span;
+    for (let i = 0; i < 5 && el.parentElement; i++) {
+        const p = el.parentElement;
+        const cs = getComputedStyle(p);
+        if (cs.display.includes('flex') && cs.flexDirection.startsWith('row')) {
+            el.insertAdjacentElement('afterend', label);
+            return;
+        }
+        if (p.matches('[data-testid="User-Name"], [data-testid="UserName"], article')) break;
+        el = p;
+    }
+    (span.closest('a') || span).insertAdjacentElement('afterend', label);
+}
+
+function decorateHandleEl(span) {
+    const txt = span.textContent;
+    if (!txt || txt.length > 16 || txt.charCodeAt(0) !== 64) return;
+    const m = HANDLE_RE.exec(txt.trim());
+    if (!m) return;
+    const u = m[1].toLowerCase();
+    if (SKIP.has(u)) return;
+
+    const info = labelInfo(u);
+    if (!info) {
+        if (!span.dataset.xrbIo) { span.dataset.xrbIo = '1'; getHandleIO().observe(span); }
+        return;
+    }
+
+    if (!span.parentElement) return;
+    let label = labelOf.get(span);
+    if (!label || !label.isConnected) {
+        label = document.createElement('span');
+        label.className = 'xrb-region-label';
+        labelOf.set(span, label);
+        placeLabel(span, label);
+    }
+    const shown = info.text.length > 28 ? info.text.slice(0, 27) + '…' : info.text;
+    const text = '📍 ' + shown;
+    if (label.textContent !== text) label.textContent = text;
+    label.dataset.user = u;
+    label.title = `Account based in: ${info.text}`;
+    label.classList.toggle('xrb-region-label--blocked', isUserBlocked(u));
+}
+
+function decorateWithin(root) {
+    if (!showLabels || !root || root.nodeType !== 1) return;
+    if (root.matches && root.matches('div[dir="ltr"] > span')) decorateHandleEl(root);
+    root.querySelectorAll('div[dir="ltr"] > span').forEach(decorateHandleEl);
+}
+
+// ───────────────────────── Article processing ─────────────────────────
+
 function getUsernamesFromArticle(article) {
     const names = new Set();
-    const nameEls = article.querySelectorAll('[data-testid="UserName"] a[href^="/"]');
-    nameEls.forEach(el => {
-        const m = el.getAttribute('href').match(/^\/([A-Za-z0-9_]+)(?:\/|\?|$)/);
+    const add = href => {
+        const m = (href || '').match(/^\/([A-Za-z0-9_]{1,15})(?:\/|\?|$)/);
         if (m && !SKIP.has(m[1].toLowerCase())) names.add(m[1].toLowerCase());
+    };
+    // Authors (tweet + quoted tweet), reposter line, and avatars (covers notifications: likers, followers…).
+    // Deliberately NOT every link in the post — @mentions in the text no longer count.
+    article.querySelectorAll(
+        '[data-testid="User-Name"] a[href^="/"], [data-testid="UserName"] a[href^="/"], [data-testid="socialContext"] a[href^="/"]'
+    ).forEach(a => add(a.getAttribute('href')));
+    article.querySelectorAll('a[href^="/"] img[src*="profile_images"]').forEach(img => {
+        const a = img.closest('a');
+        if (a) add(a.getAttribute('href'));
     });
-    for (const link of article.querySelectorAll('a[href^="/"]')) {
-        const m = (link.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]+)(?:\/|\?|$)/);
-        if (m && !SKIP.has(m[1].toLowerCase())) names.add(m[1].toLowerCase());
-    }
     return Array.from(names);
 }
 
-function applyRegionLabel(article, username, country) {
-    if (!country) return;
-
-    const nameEls = article.querySelectorAll('[data-testid="UserName"] a[href^="/"]');
-    nameEls.forEach(el => {
-        const m = el.getAttribute('href').match(/^\/([A-Za-z0-9_]+)(?:\/|\?|$)/);
-        if (m && m[1].toLowerCase() === username) {
-            const container = el.closest('[data-testid="UserName"]');
-            if (container && !container.querySelector(`.xrb-region-label[data-user="${username}"]`)) {
-                const label = document.createElement('span');
-                label.className = 'xrb-region-label';
-                label.dataset.user = username;
-                label.style.cssText = `
-                    display: inline-flex;
-                    align-items: center;
-                    margin-left: 6px;
-                    padding: 0px 4px;
-                    border-radius: 4px;
-                    font-size: 11px;
-                    font-weight: 500;
-                    color: inherit;
-                    opacity: 0.6;
-                    border: 1px solid currentColor;
-                    white-space: nowrap;
-                    vertical-align: middle;
-                `;
-                label.textContent = `📍 ${escapeHtml(country)}`;
-
-                const flexRow = container.querySelector('div[dir="ltr"]') || container.firstElementChild;
-                if (flexRow) {
-                    flexRow.appendChild(label);
-                } else {
-                    container.appendChild(label);
-                }
-            }
-        }
-    });
+function getPrimaryAuthor(article) {
+    const a = article.querySelector('[data-testid="User-Name"] a[href^="/"]');
+    const m = a && (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]{1,15})(?:\/|\?|$)/);
+    return m ? m[1].toLowerCase() : '';
 }
 
 function getTweetIdsFromArticle(article) {
+    const timeLink = article.querySelector('a[href*="/status/"] time');
+    const primary = timeLink && timeLink.closest('a');
+    const pm = primary && primary.getAttribute('href').match(/\/status\/(\d+)/);
+    if (pm) return [pm[1]];                                      // the post itself, not a quoted one
     const ids = new Set();
-    const links = article.querySelectorAll('a[href*="/status/"]');
-    for (const link of links) {
+    article.querySelectorAll('a[href*="/status/"]').forEach(link => {
         const m = link.getAttribute('href').match(/\/status\/(\d+)/);
         if (m) ids.add(m[1]);
-    }
+    });
     return Array.from(ids);
+}
+
+const DOM_AFF_URL_RE = /(?:^|[/.])(?:amzn\.(?:to|eu|asia)|a\.co|s\.click\.aliexpress\.com|shope\.ee|linksynergy\.com|shareasale\.com|awin1\.com|hop\.clickbank\.net|go\.skimresources\.com|prf\.hn|tidd\.ly|geni\.us)(?:[/?]|$)/i;
+const DOM_AFF_PARAM_RE = /[?&](?:aff|aff_id|affid|affiliate|affiliate_id|cjevent|irclickid)=|[?&]utm_medium=affiliate|amazon\.[a-z.]+\/\S*[?&]tag=/i;
+const DOM_AFF_TEXT_RE = /#(?:ad|affiliate|sponsored|paidpartnership|commissionearned)\b|affiliate links?|commission (?:earned|link)/i;
+
+// Fallback when the API payload wasn't seen (e.g. cached/prefetched responses)
+function domLooksAffiliate(article) {
+    const textEl = article.querySelector('[data-testid="tweetText"]');
+    if (textEl && DOM_AFF_TEXT_RE.test(textEl.textContent || '')) return true;
+    const links = article.querySelectorAll('[data-testid="tweetText"] a, [data-testid="card.wrapper"] a');
+    for (const a of links) {
+        const shown = a.textContent || '';
+        const href = a.getAttribute('href') || '';
+        if (DOM_AFF_URL_RE.test(shown) || DOM_AFF_PARAM_RE.test(shown) || DOM_AFF_URL_RE.test(href) || DOM_AFF_PARAM_RE.test(href)) return true;
+    }
+    return false;
+}
+
+function affiliateVerdict(article) {
+    if (!blockAffiliate && !blockAffiliated) return null;
+    const author = getPrimaryAuthor(article);
+    if (author && isExempt(author)) return null;                 // mutuals are never affiliate-blocked either
+
+    if (blockAffiliate) {
+        if (getTweetIdsFromArticle(article).some(id => affiliateTweetIds.has(id))) return 'Affiliate Post';
+        if (domLooksAffiliate(article)) return 'Affiliate Post';
+        if (author && (affiliateUserCounts.get(author) || 0) >= AFFILIATE_USER_THRESHOLD) return 'Affiliate Account';
+    }
+    if (blockAffiliated && author && affiliatedUsers.has(author)) return 'Affiliated Account';
+    return null;
 }
 
 function processArticle(article) {
     if (article.dataset.xrbTreated) return;
+    decorateWithin(article);
 
-    const tweetIds = getTweetIdsFromArticle(article);
-    for (const tweetId of tweetIds) {
-        if (blockAffiliate && affiliateTweetIds.has(tweetId)) {
-            applyTreatment(article, 'Affiliate Content');
-            return;
-        }
-    }
+    const verdict = affiliateVerdict(article);
+    if (verdict) { applyTreatment(article, verdict); return; }
 
     if (article.dataset.xrbProcessed) return;
-
     const usernames = getUsernamesFromArticle(article);
     if (!usernames.length) return;
 
-    let hasUnknownUsers = false;
-    for (const username of usernames) {
-        const cached = memCache.get(username);
-        if (cached) {
-            if (cached.country) {
-                applyRegionLabel(article, username, cached.country);
-            }
-            const ttl = cached.country ? CACHE_TTL : NEG_TTL;
-            if (Date.now() - cached.ts < ttl) {
-                if (cached.country && isBlocked(cached.country)) {
-                    applyTreatment(article, cached.country);
-                    return;
-                }
-            } else {
-                hasUnknownUsers = true;
-                queueLookup(username);
-            }
-        } else {
-            hasUnknownUsers = true;
-            queueLookup(username);
-        }
+    let unknown = false;
+    for (const u of usernames) {
+        const why = blockReason(u);
+        if (why) { applyTreatment(article, why); return; }
+        if (!memCache.has(u)) { unknown = true; queueLookup(u); }
     }
-
-    if (!hasUnknownUsers) {
-        article.dataset.xrbProcessed = 'true';
-    } else {
-        article.dataset.xrbQueued = 'true';
-    }
+    // On notifications/inbox we keep re-checking until relationship data arrives
+    if (!unknown && !SENSITIVE_PATH.test(window.location.pathname)) article.dataset.xrbProcessed = 'true';
 }
 
 function rescanDOM() {
-    document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach(art => {
+    document.querySelectorAll(ARTICLE_SEL).forEach(art => {
         if (art.dataset.xrbTreated) return;
 
-        const tweetIds = getTweetIdsFromArticle(art);
-        for (const tweetId of tweetIds) {
-            if (blockAffiliate && affiliateTweetIds.has(tweetId)) {
-                applyTreatment(art, 'Affiliate Content');
-                return;
-            }
-        }
+        const verdict = affiliateVerdict(art);
+        if (verdict) { applyTreatment(art, verdict); return; }
 
         if (art.dataset.xrbProcessed) return;
-
-        const usernames = getUsernamesFromArticle(art);
-        for (const username of usernames) {
-            const entry = memCache.get(username);
-            if (entry && entry.country) {
-                applyRegionLabel(art, username, entry.country);
-            }
-            if (blockedUsernames.has(username)) {
-                applyTreatment(art, entry?.country || 'blocked region');
-                return;
-            }
+        for (const u of getUsernamesFromArticle(art)) {
+            const why = blockReason(u);
+            if (why) { applyTreatment(art, why); return; }
         }
     });
 }
 
 function scanAll() {
-    const articles = document.querySelectorAll('article[data-testid="tweet"], article[role="article"]');
-    console.log('[XRB] scanAll found', articles.length, 'articles on', window.location.pathname);
-    articles.forEach(processArticle);
+    document.querySelectorAll(ARTICLE_SEL).forEach(processArticle);
 }
 
 function clearVisualTreatments() {
@@ -333,14 +369,12 @@ function clearVisualTreatments() {
         delete el.dataset.xrbCircle;
         delete el.dataset.xrbProfileCircle;
     });
-    document.querySelectorAll('article[data-testid="tweet"], article[role="article"]').forEach(el => {
+    document.querySelectorAll(ARTICLE_SEL).forEach(el => {
         el.style.filter = '';
         el.style.opacity = '';
         el.style.display = '';
         el.style.pointerEvents = '';
-        delete el.dataset.xrbDone;
         delete el.dataset.xrbProcessed;
         delete el.dataset.xrbTreated;
-        delete el.dataset.xrbQueued;
     });
 }

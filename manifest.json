@@ -1,21 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Cleanse (X Region Blocker)",
-  "version": "1.0.0",
-  "description": "Cleanse — filter posts on X from specific regions. Uses X's internal GraphQL API with zero visible tabs.",
-  "permissions": [
-    "storage",
-    "tabs",
-    "scripting"
-  ],
+  "version": "1.1.0",
+  "minimum_chrome_version": "111",
+  "description": "Cleanse — filter posts on X by account region and affiliate content, and show each account's region next to its name.",
+  "permissions": ["storage", "scripting"],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
     "https://api.x.com/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
+  "background": { "service_worker": "background.js" },
   "content_scripts": [
     {
       "matches": ["https://x.com/*", "https://twitter.com/*"],
