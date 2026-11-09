@@ -104,3 +104,22 @@
 .xrb-rel-chip--yes { color: #22c55e; }
 .xrb-rel-chip--no { color: #ff4444; }
 .xrb-region-label--blocked { color: #ff4444; opacity: 0.95; }
+
+/* Followers / following numbers (colour + size come from the popup) */
+.xrb-followers-chip, .xrb-following-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-weight: 600;
+  line-height: 1.4;
+  opacity: 1;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  flex-shrink: 0;
+  vertical-align: middle;
+  user-select: none;
+}
+.xrb-followers-chip { color: #38bdf8; }
+.xrb-following-chip { color: #f59e0b; }

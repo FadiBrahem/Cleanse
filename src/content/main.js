@@ -1,5 +1,6 @@
 const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
-    'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+    'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing',
+    'followersColor', 'followingColor', 'followersSize', 'followingSize'];
 
 function loadSettings(cb) {
     chrome.storage.sync.get(SETTING_KEYS, data => {
@@ -15,6 +16,10 @@ function loadSettings(cb) {
         relOnlyFollowing = data.relOnlyFollowing !== false;
         themeColor = data.themeColor || '#ff2222';
         labelColor = data.labelColor || '#22c55e';
+        followersColor = data.followersColor || '#38bdf8';
+        followingColor = data.followingColor || '#f59e0b';
+        followersSize = Math.min(24, Math.max(8, parseInt(data.followersSize, 10) || 12));
+        followingSize = Math.min(24, Math.max(8, parseInt(data.followingSize, 10) || 12));
         applyThemeStyle();
         if (cb) cb();
     });
@@ -24,7 +29,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
     if (!alive()) return;
     if (area !== 'sync') return;
     const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
-        'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+        'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing',
+        'followersColor', 'followingColor', 'followersSize', 'followingSize'];
     if (!keys.some(k => changes[k])) return;
     loadSettings(() => {
         pendingUsernames.clear();
@@ -45,7 +51,9 @@ function listenToInjector() {
 
         switch (type) {
             case 'user_info': {
-                const { username, location, following, followedBy, affiliated, followers } = payload;
+                const { username, location, following, followedBy, affiliated, followers, followingCount, region } = payload;
+                if (typeof followingCount === 'number') { followingCache.set(username, followingCount); persistRel(username); }
+                if (region && !(memCache.get(username) || {}).country) cacheResult(username, region, 'about');
                 if (typeof followers === 'number') { followersCache.set(username, followers); persistRel(username); }
                 if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
                     if (updateRel(username, following, followedBy)) scheduleFullRefresh();
@@ -121,7 +129,7 @@ async function init() {
         setTimeout(checkProfilePage, 2500);
         resumePendingUnfollow();
     });
-    console.log('[XRB] v1.7 ready');
+    console.log('[XRB] v1.8 ready');
 }
 
 init();

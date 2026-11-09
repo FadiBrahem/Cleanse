@@ -9,6 +9,10 @@ let showRelation = true;
 let relOnlyFollowing = true;
 let themeColor = '#ff2222';
 let labelColor = '#22c55e';
+let followersColor = '#38bdf8';
+let followingColor = '#f59e0b';
+let followersSize = 12;
+let followingSize = 12;
 
 const $ = id => document.getElementById(id);
 const regionInput = $('regionInput');
@@ -28,18 +32,24 @@ const relOnlyFollowingCheck = $('relOnlyFollowingCheck');
 const whitelistSelect = $('whitelistSelect');
 const themeColorInput = $('themeColorInput');
 const labelColorInput = $('labelColorInput');
+const followersColorInput = $('followersColorInput');
+const followersSizeInput = $('followersSizeInput');
+const followingColorInput = $('followingColorInput');
+const followingSizeInput = $('followingSizeInput');
 const unfollowMax = $('unfollowMax');
 const unfollowSkip = $('unfollowSkip');
 const unfollowSpeed = $('unfollowSpeed');
 
 const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
   'showLabels', 'followersMode', 'showFollowers', 'showRelation', 'relOnlyFollowing', 'themeColor', 'labelColor',
+  'followersColor', 'followingColor', 'followersSize', 'followingSize',
   'unfollowMax', 'unfollowSkip', 'unfollowSpeed'];
 
 function saveAndSync() {
   chrome.storage.sync.set({
     blockedRegions, blockMode, blockAffiliate, blockAffiliated, whitelistMode,
-    showLabels, followersMode, showRelation, relOnlyFollowing, themeColor, labelColor
+    showLabels, followersMode, showRelation, relOnlyFollowing, themeColor, labelColor,
+    followersColor, followingColor, followersSize, followingSize
   });
   render();
 }
@@ -57,6 +67,10 @@ function loadSettings() {
     relOnlyFollowing = data.relOnlyFollowing !== false;
     themeColor = data.themeColor || '#ff2222';
     labelColor = data.labelColor || '#22c55e';
+    followersColor = data.followersColor || '#38bdf8';
+    followingColor = data.followingColor || '#f59e0b';
+    followersSize = parseInt(data.followersSize, 10) || 12;
+    followingSize = parseInt(data.followingSize, 10) || 12;
 
     blockAffiliateCheck.checked = blockAffiliate;
     blockAffiliatedCheck.checked = blockAffiliated;
@@ -67,6 +81,10 @@ function loadSettings() {
     whitelistSelect.value = whitelistMode;
     themeColorInput.value = themeColor;
     labelColorInput.value = labelColor;
+    followersColorInput.value = followersColor;
+    followingColorInput.value = followingColor;
+    followersSizeInput.value = followersSize;
+    followingSizeInput.value = followingSize;
     unfollowMax.value = data.unfollowMax != null ? data.unfollowMax : 100;
     unfollowSpeed.value = data.unfollowSpeed || 'fast';
     unfollowSkip.value = data.unfollowSkip || '';
@@ -150,6 +168,11 @@ relOnlyFollowingCheck.addEventListener('change', e => { relOnlyFollowing = e.tar
 whitelistSelect.addEventListener('change', e => { whitelistMode = e.target.value; saveAndSync(); });
 themeColorInput.addEventListener('input', e => { themeColor = e.target.value; saveAndSync(); });
 labelColorInput.addEventListener('input', e => { labelColor = e.target.value; saveAndSync(); });
+followersColorInput.addEventListener('input', e => { followersColor = e.target.value; saveAndSync(); });
+followingColorInput.addEventListener('input', e => { followingColor = e.target.value; saveAndSync(); });
+const clampSize = v => Math.min(24, Math.max(8, parseInt(v, 10) || 12));
+followersSizeInput.addEventListener('change', e => { followersSize = clampSize(e.target.value); e.target.value = followersSize; saveAndSync(); });
+followingSizeInput.addEventListener('change', e => { followingSize = clampSize(e.target.value); e.target.value = followingSize; saveAndSync(); });
 
 // ── Unfollow non-followers ──
 unfollowMax.addEventListener('change', () => chrome.storage.sync.set({ unfollowMax: parseInt(unfollowMax.value, 10) || 0 }));

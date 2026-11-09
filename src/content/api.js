@@ -40,18 +40,20 @@ function lookupsPaused() {
     return now < rateLimitedUntil || now - nativeAboutAt < 20000 || document.hidden || isAboutOpen();
 }
 
-function findFollowersDeep(o) {
+function findNumDeep(o, re) {
     const q = [[o, 0]];
     while (q.length) {
         const [x, d] = q.shift();
         for (const k of Object.keys(x)) {
             const v = x[k];
-            if (typeof v === 'number' && /^(?:normal_)?followers(?:_count)?$/i.test(k)) return v;
+            if (typeof v === 'number' && re.test(k)) return v;
             if (v && typeof v === 'object' && !Array.isArray(v) && d < 3) q.push([v, d + 1]);
         }
     }
     return undefined;
 }
+function findFollowersDeep(o) { return findNumDeep(o, /^(?:normal_)?followers(?:_count)?$/i); }
+function countsKnown(u) { return typeof followersCache.get(u) === 'number' && typeof followingCache.get(u) === 'number'; }
 
 function xHeaders() {
     return {
@@ -65,7 +67,13 @@ function xHeaders() {
 
 function ingestUserResult(username, result) {
     const fc = findFollowersDeep(result);
-    if (typeof fc === 'number') { followersCache.set(username, fc); persistRel(username); }
+    const gc = findNumDeep(result, /^(?:friends|following)_count$/i);
+    if (typeof fc === 'number') followersCache.set(username, fc);
+    if (typeof gc === 'number') followingCache.set(username, gc);
+    if (typeof fc === 'number' || typeof gc === 'number') persistRel(username);
+    // The same response often carries the region too: use it, no extra request needed
+    const region = result?.about_profile?.account_based_in;
+    if (region && typeof region === 'string' && !(memCache.get(username) || {}).country) cacheResult(username, region, 'about');
     const rp = result?.relationship_perspectives || {};
     const following = rp.following ?? result?.legacy?.following;
     const followedBy = rp.followed_by ?? result?.legacy?.followed_by;
@@ -187,7 +195,7 @@ function followersBudgetOk() {
 
 function queueFollowers(u) {
     if (!userTemplate.hash || !userTemplate.variables) return;       // learned after X loads any profile
-    if (followersCache.has(u) || followersTried.has(u) || followersQueueSet.has(u)) return;
+    if (countsKnown(u) || followersTried.has(u) || followersQueueSet.has(u)) return;
     if (Date.now() < userRateLimitedUntil) return;
     if (followersQueue.length >= 40) followersQueueSet.delete(followersQueue.shift());
     followersQueue.push(u);
@@ -203,7 +211,7 @@ async function drainFollowers() {
             if (!alive() || document.hidden || Date.now() < userRateLimitedUntil || !followersBudgetOk()) break;
             const u = followersQueue.pop();                           // newest = what's on screen
             followersQueueSet.delete(u);
-            if (followersCache.has(u)) continue;
+            if (countsKnown(u)) continue;
             await lookupFollowers(u);
             await sleep(2500 + Math.random() * 1500);
         }
@@ -231,6 +239,7 @@ async function lookupFollowers(u) {
         const result = data?.data?.user?.result || data?.data?.user_result_by_screen_name?.result;
         if (!result) return;
         ingestUserResult(u, result);
+        console.log('[XRB] profile lookup:', u, '| followers', followersCache.get(u), '| following', followingCache.get(u), '| region', (memCache.get(u) || {}).country || '(not in response)');
         scheduleDecorate(document.body);
     } catch (e) { }
 }

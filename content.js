@@ -1,4 +1,4 @@
-// Cleanse (X Region Blocker) v1.7
+// Cleanse (X Region Blocker) v1.8
 // Built from modular src/ — edit src/content/*.js, then run: node build.js
 
 (function () {
@@ -28,12 +28,17 @@
   let relOnlyFollowing = true;          // ...only for accounts I follow
   let themeColor = '#ff2222';
   let labelColor = '#22c55e';      // region label colour (popup option)
+  let followersColor = '#38bdf8';  // followers number
+  let followingColor = '#f59e0b';  // following number
+  let followersSize = 12;          // px
+  let followingSize = 12;          // px
 
   // ── Runtime data ──
   const memCache = new Map();          // username -> { country, ts, src }
   const profileLoc = new Map();        // username -> self-written profile location (free text; blocking fallback only)
   const relCache = new Map();          // username -> { following, followedBy }
   const followersCache = new Map();    // username -> follower count
+  const followingCache = new Map();    // username -> number of accounts they follow
   const affiliatedUsers = new Set();
   const affiliateUserCounts = new Map();
   const affiliateTweetIds = new Set();
@@ -200,6 +205,7 @@
                   if (now - e.ts >= 7 * 24 * 60 * 60 * 1000) continue;
                   if (typeof e.fb === 'boolean' || typeof e.f === 'boolean') relCache.set(u, { following: e.f, followedBy: e.fb });
                   if (typeof e.c === 'number') followersCache.set(u, e.c);
+                  if (typeof e.g === 'number') followingCache.set(u, e.g);
               }
           } catch (e) { }
           if (stored.xrb_own && !ownUsername) ownUsername = stored.xrb_own;
@@ -218,8 +224,9 @@
   function persistRel(u) {
       const r = relCache.get(u) || {};
       const c = followersCache.get(u);
-      if (typeof r.followedBy !== 'boolean' && typeof c !== 'number') return;
-      pendingRel.set(u, { f: r.following, fb: r.followedBy, c, ts: Date.now() });
+      const g = followingCache.get(u);
+      if (typeof r.followedBy !== 'boolean' && typeof c !== 'number' && typeof g !== 'number') return;
+      pendingRel.set(u, { f: r.following, fb: r.followedBy, c, g, ts: Date.now() });
       if (!relTimer) relTimer = setTimeout(flushRel, 4000);
   }
 
@@ -338,18 +345,20 @@
       return now < rateLimitedUntil || now - nativeAboutAt < 20000 || document.hidden || isAboutOpen();
   }
 
-  function findFollowersDeep(o) {
+  function findNumDeep(o, re) {
       const q = [[o, 0]];
       while (q.length) {
           const [x, d] = q.shift();
           for (const k of Object.keys(x)) {
               const v = x[k];
-              if (typeof v === 'number' && /^(?:normal_)?followers(?:_count)?$/i.test(k)) return v;
+              if (typeof v === 'number' && re.test(k)) return v;
               if (v && typeof v === 'object' && !Array.isArray(v) && d < 3) q.push([v, d + 1]);
           }
       }
       return undefined;
   }
+  function findFollowersDeep(o) { return findNumDeep(o, /^(?:normal_)?followers(?:_count)?$/i); }
+  function countsKnown(u) { return typeof followersCache.get(u) === 'number' && typeof followingCache.get(u) === 'number'; }
 
   function xHeaders() {
       return {
@@ -363,7 +372,13 @@
 
   function ingestUserResult(username, result) {
       const fc = findFollowersDeep(result);
-      if (typeof fc === 'number') { followersCache.set(username, fc); persistRel(username); }
+      const gc = findNumDeep(result, /^(?:friends|following)_count$/i);
+      if (typeof fc === 'number') followersCache.set(username, fc);
+      if (typeof gc === 'number') followingCache.set(username, gc);
+      if (typeof fc === 'number' || typeof gc === 'number') persistRel(username);
+      // The same response often carries the region too: use it, no extra request needed
+      const region = result?.about_profile?.account_based_in;
+      if (region && typeof region === 'string' && !(memCache.get(username) || {}).country) cacheResult(username, region, 'about');
       const rp = result?.relationship_perspectives || {};
       const following = rp.following ?? result?.legacy?.following;
       const followedBy = rp.followed_by ?? result?.legacy?.followed_by;
@@ -485,7 +500,7 @@
 
   function queueFollowers(u) {
       if (!userTemplate.hash || !userTemplate.variables) return;       // learned after X loads any profile
-      if (followersCache.has(u) || followersTried.has(u) || followersQueueSet.has(u)) return;
+      if (countsKnown(u) || followersTried.has(u) || followersQueueSet.has(u)) return;
       if (Date.now() < userRateLimitedUntil) return;
       if (followersQueue.length >= 40) followersQueueSet.delete(followersQueue.shift());
       followersQueue.push(u);
@@ -501,7 +516,7 @@
               if (!alive() || document.hidden || Date.now() < userRateLimitedUntil || !followersBudgetOk()) break;
               const u = followersQueue.pop();                           // newest = what's on screen
               followersQueueSet.delete(u);
-              if (followersCache.has(u)) continue;
+              if (countsKnown(u)) continue;
               await lookupFollowers(u);
               await sleep(2500 + Math.random() * 1500);
           }
@@ -529,6 +544,7 @@
           const result = data?.data?.user?.result || data?.data?.user_result_by_screen_name?.result;
           if (!result) return;
           ingestUserResult(u, result);
+          console.log('[XRB] profile lookup:', u, '| followers', followersCache.get(u), '| following', followingCache.get(u), '| region', (memCache.get(u) || {}).country || '(not in response)');
           scheduleDecorate(document.body);
       } catch (e) { }
   }
@@ -565,6 +581,8 @@
       }
       .xrb-region-label { color: ${labelColor} !important; border-color: ${labelColor} !important; }
       .xrb-region-label--blocked { color: ${themeColor} !important; border-color: ${themeColor} !important; }
+      .xrb-followers-chip { color: ${followersColor} !important; font-size: ${followersSize}px !important; opacity: 1 !important; }
+      .xrb-following-chip { color: ${followingColor} !important; font-size: ${followingSize}px !important; opacity: 1 !important; }
       @keyframes xrb-pulse {
         0%,100% { box-shadow: 0 0 0 2px rgba(${rgb}, 0.35); }
         50%      { box-shadow: 0 0 0 4px rgba(${rgb}, 0.55); }
@@ -814,35 +832,53 @@
   function decorateFollowers(span, u) {
       const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
       if (!cont) return;
-      let chip = uniqueChip(scopeFor(span), 'xrb-followers-chip', u);
+      const scope = scopeFor(span);
+      let fChip = uniqueChip(scope, 'xrb-followers-chip', u);
+      let gChip = uniqueChip(scope, 'xrb-following-chip', u);
       const n = followersCache.get(u);
-      if (typeof n !== 'number' && followersMode !== 'off' && chipContext(span) &&
+      const g = followingCache.get(u);
+      if (!countsKnown(u) && followersMode !== 'off' && chipContext(span) &&
           (followersMode === 'always' || notFollowingBack(u))) {
           const r = span.getBoundingClientRect();                        // only accounts near the screen
-          if (r.bottom > -300 && r.top < window.innerHeight + 300) queueFollowers(u);
+          if (r.bottom > -300 && r.top < window.innerHeight + 300) { queueFollowers(u); queueLookup(u); }
       }
 
       let want = false;
-      if (typeof n === 'number') {
-          if (followersMode === 'always') want = true;
-          else if (followersMode === 'nofollowback') want = chipContext(span) && notFollowingBack(u);
-      }
-      if (!want) { if (chip) chip.remove(); return; }
+      if (followersMode === 'always') want = true;
+      else if (followersMode === 'nofollowback') want = chipContext(span) && notFollowingBack(u);
+      if (!want) { if (fChip) fChip.remove(); if (gChip) gChip.remove(); return; }
 
       const nameBlock = cont.firstElementChild;
       if (!nameBlock) return;
-      if (!chip) {
-          const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
-              s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
-          if (!nameSpan) return;
-          chip = document.createElement('span');
-          chip.className = 'xrb-followers-chip';
-          chip.dataset.user = u;
-          placeLabel(nameSpan, chip, scopeFor(span));
-      }
-      const text = '👥 ' + fmtCount(n);
-      if (chip.textContent !== text) chip.textContent = text;
-      chip.title = `${n.toLocaleString()} followers`;
+      const nameSpan = () => [...nameBlock.querySelectorAll('span')].find(s =>
+          s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
+
+      if (typeof n === 'number') {
+          if (!fChip) {
+              const ns = nameSpan();
+              if (!ns) return;
+              fChip = document.createElement('span');
+              fChip.className = 'xrb-followers-chip';
+              fChip.dataset.user = u;
+              placeLabel(ns, fChip, scope);
+          }
+          const text = fmtCount(n) + ' followers';
+          if (fChip.textContent !== text) fChip.textContent = text;
+          fChip.title = `${n.toLocaleString()} followers`;
+      } else if (fChip) fChip.remove();
+
+      if (typeof g === 'number') {
+          if (!gChip) {
+              gChip = document.createElement('span');
+              gChip.className = 'xrb-following-chip';
+              gChip.dataset.user = u;
+              if (fChip) fChip.insertAdjacentElement('afterend', gChip);
+              else { const ns = nameSpan(); if (!ns) return; placeLabel(ns, gChip, scope); }
+          }
+          const text = fmtCount(g) + ' following';
+          if (gChip.textContent !== text) gChip.textContent = text;
+          gChip.title = `Follows ${g.toLocaleString()} accounts`;
+      } else if (gChip) gChip.remove();
   }
 
   function decorateRelation(span, u) {
@@ -1016,7 +1052,7 @@
   }
 
   function clearVisualTreatments() {
-      document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label, .xrb-followers-chip, .xrb-rel-chip').forEach(el => el.remove());
+      document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label, .xrb-followers-chip, .xrb-following-chip, .xrb-rel-chip').forEach(el => el.remove());
       document.querySelectorAll('[data-xrb-circle], [data-xrb-profile-circle]').forEach(el => {
           delete el.dataset.xrbCircle;
           delete el.dataset.xrbProfileCircle;
@@ -1050,7 +1086,7 @@
 
   function isOwnNode(node) {
       const c = node.classList;
-      return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') ||
+      return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-following-chip') || c.contains('xrb-rel-chip') ||
           c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
           c.contains('xrb-banner') || c.contains('xrb-profile-no-symbol'));
   }
@@ -1344,7 +1380,8 @@
 
   // ── main.js ──
   const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
-      'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+      'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing',
+      'followersColor', 'followingColor', 'followersSize', 'followingSize'];
 
   function loadSettings(cb) {
       chrome.storage.sync.get(SETTING_KEYS, data => {
@@ -1360,6 +1397,10 @@
           relOnlyFollowing = data.relOnlyFollowing !== false;
           themeColor = data.themeColor || '#ff2222';
           labelColor = data.labelColor || '#22c55e';
+          followersColor = data.followersColor || '#38bdf8';
+          followingColor = data.followingColor || '#f59e0b';
+          followersSize = Math.min(24, Math.max(8, parseInt(data.followersSize, 10) || 12));
+          followingSize = Math.min(24, Math.max(8, parseInt(data.followingSize, 10) || 12));
           applyThemeStyle();
           if (cb) cb();
       });
@@ -1369,7 +1410,8 @@
       if (!alive()) return;
       if (area !== 'sync') return;
       const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
-          'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+          'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing',
+          'followersColor', 'followingColor', 'followersSize', 'followingSize'];
       if (!keys.some(k => changes[k])) return;
       loadSettings(() => {
           pendingUsernames.clear();
@@ -1390,7 +1432,9 @@
 
           switch (type) {
               case 'user_info': {
-                  const { username, location, following, followedBy, affiliated, followers } = payload;
+                  const { username, location, following, followedBy, affiliated, followers, followingCount, region } = payload;
+                  if (typeof followingCount === 'number') { followingCache.set(username, followingCount); persistRel(username); }
+                  if (region && !(memCache.get(username) || {}).country) cacheResult(username, region, 'about');
                   if (typeof followers === 'number') { followersCache.set(username, followers); persistRel(username); }
                   if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
                       if (updateRel(username, following, followedBy)) scheduleFullRefresh();
@@ -1466,7 +1510,7 @@
           setTimeout(checkProfilePage, 2500);
           resumePendingUnfollow();
       });
-      console.log('[XRB] v1.7 ready');
+      console.log('[XRB] v1.8 ready');
   }
 
   init();

@@ -15,7 +15,7 @@ function scheduleDecorate(node) {
 
 function isOwnNode(node) {
     const c = node.classList;
-    return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') ||
+    return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-following-chip') || c.contains('xrb-rel-chip') ||
         c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
         c.contains('xrb-banner') || c.contains('xrb-profile-no-symbol'));
 }

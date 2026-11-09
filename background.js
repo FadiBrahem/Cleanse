@@ -25,7 +25,7 @@ chrome.runtime.onInstalled.addListener(injectIntoExistingTabs);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'PING') {
-    sendResponse({ ok: true, version: '1.7.0' });
+    sendResponse({ ok: true, version: '1.8.0' });
     return true;
   }
 });

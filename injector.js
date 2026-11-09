@@ -46,18 +46,20 @@
   }
 
   // X moved/removed `legacy.followers_count` in timeline payloads (legacy can be empty), so search the whole user object.
-  function findFollowers(o) {
+  function findCount(o, re) {
     const q = [[o, 0]];
     while (q.length) {
       const [x, d] = q.shift();
       for (const k of Object.keys(x)) {
         const v = x[k];
-        if (typeof v === 'number' && /^(?:normal_)?followers(?:_count)?$/i.test(k)) return v;
+        if (typeof v === 'number' && re.test(k)) return v;
         if (v && typeof v === 'object' && !Array.isArray(v) && d < 3) q.push([v, d + 1]);
       }
     }
     return undefined;
   }
+  function findFollowers(o) { return findCount(o, /^(?:normal_)?followers(?:_count)?$/i); }
+  function findFollowing(o) { return findCount(o, /^(?:friends|following)_count$/i); }
   function numericPaths(o) {
     const out = [];
     const q = [['', o, 0]];
@@ -91,6 +93,8 @@
       followedBy: bool(rp.followed_by ?? o.legacy?.followed_by ?? o.followed_by),
       affiliated: !!(lab && typeof lab === 'object' && Object.keys(lab).length),
       followers: findFollowers(o),
+      followingCount: findFollowing(o),
+      region: typeof o.about_profile?.account_based_in === 'string' ? o.about_profile.account_based_in : undefined,
       restId: o.rest_id ? String(o.rest_id) : undefined
     };
   }
@@ -146,7 +150,7 @@
       if (u) {
         // De-dupe on CONTENT, not just username: the first copy of a user in a payload is often a stripped
         // version (no follower count / relationship) and must not hide the full one.
-        const key = [u.username, u.followers, u.following, u.followedBy, u.location, u.affiliated].join('|');
+        const key = [u.username, u.followers, u.followingCount, u.region, u.following, u.followedBy, u.location, u.affiliated].join('|');
         if (!seenUsers.has(key)) {
           seenUsers.add(key);
           emit('user_info', u);

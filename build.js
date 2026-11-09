@@ -6,7 +6,7 @@ const outPath = path.join(__dirname, 'content.js');
 
 const files = ['state.js', 'cache.js', 'api.js', 'ui.js', 'observers.js', 'unfollow.js', 'main.js'];
 
-let out = `// Cleanse (X Region Blocker) v1.7
+let out = `// Cleanse (X Region Blocker) v1.8
 // Built from modular src/ — edit src/content/*.js, then run: node build.js
 
 (function () {

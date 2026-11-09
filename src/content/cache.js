@@ -21,6 +21,7 @@ async function loadDiskCache() {
                 if (now - e.ts >= 7 * 24 * 60 * 60 * 1000) continue;
                 if (typeof e.fb === 'boolean' || typeof e.f === 'boolean') relCache.set(u, { following: e.f, followedBy: e.fb });
                 if (typeof e.c === 'number') followersCache.set(u, e.c);
+                if (typeof e.g === 'number') followingCache.set(u, e.g);
             }
         } catch (e) { }
         if (stored.xrb_own && !ownUsername) ownUsername = stored.xrb_own;
@@ -39,8 +40,9 @@ async function loadDiskCache() {
 function persistRel(u) {
     const r = relCache.get(u) || {};
     const c = followersCache.get(u);
-    if (typeof r.followedBy !== 'boolean' && typeof c !== 'number') return;
-    pendingRel.set(u, { f: r.following, fb: r.followedBy, c, ts: Date.now() });
+    const g = followingCache.get(u);
+    if (typeof r.followedBy !== 'boolean' && typeof c !== 'number' && typeof g !== 'number') return;
+    pendingRel.set(u, { f: r.following, fb: r.followedBy, c, g, ts: Date.now() });
     if (!relTimer) relTimer = setTimeout(flushRel, 4000);
 }
 

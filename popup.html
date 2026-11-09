@@ -419,7 +419,7 @@
       <img src="icons/icon128.png" width="20" height="20" style="display:block;" />
     </div>
     <div class="header-text">
-      <h1>Cleanse <span class="v-badge">v1.6</span></h1>
+      <h1>Cleanse <span class="v-badge">v1.8</span></h1>
       <p>API-Level Location & Affiliates Filtering</p>
     </div>
     <div class="status-dot" id="statusDot"></div>
@@ -480,6 +480,22 @@
             <option value="always">Always</option>
             <option value="off">Off</option>
           </select>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;color:var(--text-dim);">Followers number:</span>
+          <span style="display:flex;align-items:center;gap:6px;">
+            <input type="color" id="followersColorInput" value="#38bdf8" style="cursor:pointer;width:30px;height:24px;border:none;border-radius:4px;padding:0;background:transparent;" title="Color" />
+            <input class="region-input" id="followersSizeInput" type="number" min="8" max="24" value="12" style="flex:none;width:54px;padding:4px 6px;" title="Size (px)" />
+            <span style="font-size:11px;color:var(--text-dim);">px</span>
+          </span>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;color:var(--text-dim);">Following number:</span>
+          <span style="display:flex;align-items:center;gap:6px;">
+            <input type="color" id="followingColorInput" value="#f59e0b" style="cursor:pointer;width:30px;height:24px;border:none;border-radius:4px;padding:0;background:transparent;" title="Color" />
+            <input class="region-input" id="followingSizeInput" type="number" min="8" max="24" value="12" style="flex:none;width:54px;padding:4px 6px;" title="Size (px)" />
+            <span style="font-size:11px;color:var(--text-dim);">px</span>
+          </span>
         </div>
         <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;color:var(--text);">
           <input type="checkbox" id="showRelationCheck" style="accent-color: var(--red); cursor: pointer;" />

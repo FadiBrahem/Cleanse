@@ -28,6 +28,8 @@ function applyThemeStyle() {
     }
     .xrb-region-label { color: ${labelColor} !important; border-color: ${labelColor} !important; }
     .xrb-region-label--blocked { color: ${themeColor} !important; border-color: ${themeColor} !important; }
+    .xrb-followers-chip { color: ${followersColor} !important; font-size: ${followersSize}px !important; opacity: 1 !important; }
+    .xrb-following-chip { color: ${followingColor} !important; font-size: ${followingSize}px !important; opacity: 1 !important; }
     @keyframes xrb-pulse {
       0%,100% { box-shadow: 0 0 0 2px rgba(${rgb}, 0.35); }
       50%      { box-shadow: 0 0 0 4px rgba(${rgb}, 0.55); }
@@ -277,35 +279,53 @@ function relStatus(u) {
 function decorateFollowers(span, u) {
     const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
     if (!cont) return;
-    let chip = uniqueChip(scopeFor(span), 'xrb-followers-chip', u);
+    const scope = scopeFor(span);
+    let fChip = uniqueChip(scope, 'xrb-followers-chip', u);
+    let gChip = uniqueChip(scope, 'xrb-following-chip', u);
     const n = followersCache.get(u);
-    if (typeof n !== 'number' && followersMode !== 'off' && chipContext(span) &&
+    const g = followingCache.get(u);
+    if (!countsKnown(u) && followersMode !== 'off' && chipContext(span) &&
         (followersMode === 'always' || notFollowingBack(u))) {
         const r = span.getBoundingClientRect();                        // only accounts near the screen
-        if (r.bottom > -300 && r.top < window.innerHeight + 300) queueFollowers(u);
+        if (r.bottom > -300 && r.top < window.innerHeight + 300) { queueFollowers(u); queueLookup(u); }
     }
 
     let want = false;
-    if (typeof n === 'number') {
-        if (followersMode === 'always') want = true;
-        else if (followersMode === 'nofollowback') want = chipContext(span) && notFollowingBack(u);
-    }
-    if (!want) { if (chip) chip.remove(); return; }
+    if (followersMode === 'always') want = true;
+    else if (followersMode === 'nofollowback') want = chipContext(span) && notFollowingBack(u);
+    if (!want) { if (fChip) fChip.remove(); if (gChip) gChip.remove(); return; }
 
     const nameBlock = cont.firstElementChild;
     if (!nameBlock) return;
-    if (!chip) {
-        const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
-            s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
-        if (!nameSpan) return;
-        chip = document.createElement('span');
-        chip.className = 'xrb-followers-chip';
-        chip.dataset.user = u;
-        placeLabel(nameSpan, chip, scopeFor(span));
-    }
-    const text = '👥 ' + fmtCount(n);
-    if (chip.textContent !== text) chip.textContent = text;
-    chip.title = `${n.toLocaleString()} followers`;
+    const nameSpan = () => [...nameBlock.querySelectorAll('span')].find(s =>
+        s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
+
+    if (typeof n === 'number') {
+        if (!fChip) {
+            const ns = nameSpan();
+            if (!ns) return;
+            fChip = document.createElement('span');
+            fChip.className = 'xrb-followers-chip';
+            fChip.dataset.user = u;
+            placeLabel(ns, fChip, scope);
+        }
+        const text = fmtCount(n) + ' followers';
+        if (fChip.textContent !== text) fChip.textContent = text;
+        fChip.title = `${n.toLocaleString()} followers`;
+    } else if (fChip) fChip.remove();
+
+    if (typeof g === 'number') {
+        if (!gChip) {
+            gChip = document.createElement('span');
+            gChip.className = 'xrb-following-chip';
+            gChip.dataset.user = u;
+            if (fChip) fChip.insertAdjacentElement('afterend', gChip);
+            else { const ns = nameSpan(); if (!ns) return; placeLabel(ns, gChip, scope); }
+        }
+        const text = fmtCount(g) + ' following';
+        if (gChip.textContent !== text) gChip.textContent = text;
+        gChip.title = `Follows ${g.toLocaleString()} accounts`;
+    } else if (gChip) gChip.remove();
 }
 
 function decorateRelation(span, u) {
@@ -479,7 +499,7 @@ function scanAll() {
 }
 
 function clearVisualTreatments() {
-    document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label, .xrb-followers-chip, .xrb-rel-chip').forEach(el => el.remove());
+    document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label, .xrb-followers-chip, .xrb-following-chip, .xrb-rel-chip').forEach(el => el.remove());
     document.querySelectorAll('[data-xrb-circle], [data-xrb-profile-circle]').forEach(el => {
         delete el.dataset.xrbCircle;
         delete el.dataset.xrbProfileCircle;

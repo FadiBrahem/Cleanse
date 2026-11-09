@@ -19,12 +19,17 @@ let showRelation = true;              // green "Follows you" / red "Not followin
 let relOnlyFollowing = true;          // ...only for accounts I follow
 let themeColor = '#ff2222';
 let labelColor = '#22c55e';      // region label colour (popup option)
+let followersColor = '#38bdf8';  // followers number
+let followingColor = '#f59e0b';  // following number
+let followersSize = 12;          // px
+let followingSize = 12;          // px
 
 // ── Runtime data ──
 const memCache = new Map();          // username -> { country, ts, src }
 const profileLoc = new Map();        // username -> self-written profile location (free text; blocking fallback only)
 const relCache = new Map();          // username -> { following, followedBy }
 const followersCache = new Map();    // username -> follower count
+const followingCache = new Map();    // username -> number of accounts they follow
 const affiliatedUsers = new Set();
 const affiliateUserCounts = new Map();
 const affiliateTweetIds = new Set();
