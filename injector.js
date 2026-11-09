@@ -7,7 +7,9 @@
 
   const CHANNEL = '__xrb_data__';
   const READY = '__xrb_ready__';
-  const MAX_BUFFER = 400;
+  const MAX_BUFFER = 600;
+  let dbgNoFollowers = 0;
+  let dbgNoRel = 0;
   let ready = false;
   const buffer = [];
 
@@ -60,7 +62,8 @@
       location: typeof loc === 'string' ? loc : '',
       following: bool(rp.following ?? o.legacy?.following ?? o.following),
       followedBy: bool(rp.followed_by ?? o.legacy?.followed_by ?? o.followed_by),
-      affiliated: !!(lab && typeof lab === 'object' && Object.keys(lab).length)
+      affiliated: !!(lab && typeof lab === 'object' && Object.keys(lab).length),
+      followers: (() => { const n = o.legacy?.followers_count ?? o.followers_count ?? o.legacy?.normal_followers_count ?? o.public_metrics?.followers_count ?? o.counts?.followers; return typeof n === 'number' ? n : undefined; })()
     };
   }
 
@@ -111,9 +114,23 @@
 
     if (!Array.isArray(obj)) {
       const u = userFrom(obj);
-      if (u && !seenUsers.has(u.username)) {
-        seenUsers.add(u.username);
-        emit('user_info', u);
+      if (u) {
+        // De-dupe on CONTENT, not just username: the first copy of a user in a payload is often a stripped
+        // version (no follower count / relationship) and must not hide the full one.
+        const key = [u.username, u.followers, u.following, u.followedBy, u.location, u.affiliated].join('|');
+        if (!seenUsers.has(key)) {
+          seenUsers.add(key);
+          emit('user_info', u);
+          if (u.following !== undefined && u.followedBy === undefined && dbgNoRel < 3) {
+            dbgNoRel++;
+            console.warn('[XRB-INJECT] user has no followed_by:', u.username, 'relationship_perspectives keys:', Object.keys(obj.relationship_perspectives || {}), 'legacy keys:', Object.keys(obj.legacy || {}));
+          }
+          if (u.followers === undefined && dbgNoFollowers < 3) {
+            dbgNoFollowers++;
+            console.warn('[XRB-INJECT] user object without follower count:', u.username,
+              'keys:', Object.keys(obj), 'legacy keys:', Object.keys(obj.legacy || {}));
+          }
+        }
       }
       if (obj.rest_id && typeof obj.legacy?.full_text === 'string' && !seenTweets.has(obj.rest_id)) {
         seenTweets.add(obj.rest_id);

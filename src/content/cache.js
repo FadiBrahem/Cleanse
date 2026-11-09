@@ -1,4 +1,6 @@
 const pendingDisk = new Map();
+const pendingRel = new Map();
+let relTimer = null;
 let diskTimer = null;
 let refreshTimer = null;
 let fullRefreshTimer = null;
@@ -13,6 +15,12 @@ async function loadDiskCache() {
             const ttl = entry.country ? CACHE_TTL : NEG_TTL;
             if (now - entry.ts < ttl) { memCache.set(username, entry); loaded++; }
         }
+        try {
+            const rs = (await chrome.storage.local.get(REL_KEY))[REL_KEY] || {};
+            for (const [u, e] of Object.entries(rs)) {
+                if (now - e.ts < 7 * 24 * 60 * 60 * 1000) relCache.set(u, { following: e.f, followedBy: e.fb });
+            }
+        } catch (e) { }
         const t = stored[TEMPLATE_KEY];
         if (t && t.hash) {
             aboutTemplate.hash = t.hash;
@@ -20,6 +28,29 @@ async function loadDiskCache() {
             aboutTemplate.fieldToggles = t.fieldToggles || null;
         }
         console.log('[XRB] Cache loaded:', loaded, 'entries');
+    } catch (e) { }
+}
+
+// Follow relationships learned from X's data or from your Following/Followers pages (kept 7 days)
+function persistRel(u) {
+    const r = relCache.get(u);
+    if (!r || typeof r.followedBy !== 'boolean') return;
+    pendingRel.set(u, { f: r.following, fb: r.followedBy, ts: Date.now() });
+    if (!relTimer) relTimer = setTimeout(flushRel, 4000);
+}
+
+async function flushRel() {
+    relTimer = null;
+    if (!pendingRel.size) return;
+    const batch = [...pendingRel];
+    pendingRel.clear();
+    try {
+        let raw = (await chrome.storage.local.get(REL_KEY))[REL_KEY] || {};
+        for (const [u, e] of batch) raw[u] = e;
+        if (Object.keys(raw).length > 6000) {
+            raw = Object.fromEntries(Object.entries(raw).sort((a, b) => b[1].ts - a[1].ts).slice(0, 4500));
+        }
+        await chrome.storage.local.set({ [REL_KEY]: raw });
     } catch (e) { }
 }
 

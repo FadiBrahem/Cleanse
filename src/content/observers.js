@@ -14,7 +14,7 @@ function scheduleDecorate(node) {
 
 function isOwnNode(node) {
     const c = node.classList;
-    return !!c && (c.contains('xrb-region-label') || c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
+    return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') || c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
         c.contains('xrb-banner') || c.contains('xrb-profile-no-symbol'));
 }
 
@@ -87,6 +87,7 @@ function startIntervalScan() {
         if (blockedRegions.length || blockAffiliate || blockAffiliated) rescanDOM();
         checkProfilePage();
         checkAboutPage();
+        learnRelFromList();
 
         if (tick % 2 === 0) retryVisibleArticles();
         if (tick % 2 === 1) decorateWithin(document.body);

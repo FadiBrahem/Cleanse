@@ -65,4 +65,38 @@
   vertical-align: middle;
   user-select: none;
 }
+.xrb-followers-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  color: inherit;
+  opacity: 0.7;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  flex-shrink: 0;
+  vertical-align: middle;
+  user-select: none;
+}
+.xrb-rel-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+  flex-shrink: 0;
+  vertical-align: middle;
+  user-select: none;
+}
+.xrb-rel-chip--yes { color: #22c55e; }
+.xrb-rel-chip--no { color: #ff4444; }
 .xrb-region-label--blocked { color: #ff4444; opacity: 0.95; }

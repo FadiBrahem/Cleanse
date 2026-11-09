@@ -4,6 +4,9 @@ let blockAffiliate = false;
 let blockAffiliated = false;
 let whitelistMode = 'mutuals';
 let showLabels = true;
+let followersMode = 'nofollowback';
+let showRelation = true;
+let relOnlyFollowing = true;
 let themeColor = '#ff2222';
 let labelColor = '#22c55e';
 
@@ -19,35 +22,54 @@ const toast = $('toast');
 const blockAffiliateCheck = $('blockAffiliateCheck');
 const blockAffiliatedCheck = $('blockAffiliatedCheck');
 const showLabelsCheck = $('showLabelsCheck');
+const followersSelect = $('followersSelect');
+const showRelationCheck = $('showRelationCheck');
+const relOnlyFollowingCheck = $('relOnlyFollowingCheck');
 const whitelistSelect = $('whitelistSelect');
 const themeColorInput = $('themeColorInput');
 const labelColorInput = $('labelColorInput');
+const unfollowMax = $('unfollowMax');
+const unfollowSkip = $('unfollowSkip');
+
+const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
+  'showLabels', 'followersMode', 'showFollowers', 'showRelation', 'relOnlyFollowing', 'themeColor', 'labelColor',
+  'unfollowMax', 'unfollowSkip'];
 
 function saveAndSync() {
-  chrome.storage.sync.set({ blockedRegions, blockMode, blockAffiliate, blockAffiliated, whitelistMode, showLabels, themeColor, labelColor });
+  chrome.storage.sync.set({
+    blockedRegions, blockMode, blockAffiliate, blockAffiliated, whitelistMode,
+    showLabels, followersMode, showRelation, relOnlyFollowing, themeColor, labelColor
+  });
   render();
 }
 
 function loadSettings() {
-  chrome.storage.sync.get(
-    ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor'],
-    (data) => {
-      blockedRegions = data.blockedRegions || [];
-      blockMode = data.blockMode || 'overlay';
-      blockAffiliate = !!data.blockAffiliate;
-      blockAffiliated = !!data.blockAffiliated;
-      whitelistMode = data.whitelistMode || 'mutuals';
-      showLabels = data.showLabels !== false;
-      themeColor = data.themeColor || '#ff2222';
-      labelColor = data.labelColor || '#22c55e';
-      labelColorInput.value = labelColor;
-      blockAffiliateCheck.checked = blockAffiliate;
-      blockAffiliatedCheck.checked = blockAffiliated;
-      showLabelsCheck.checked = showLabels;
-      whitelistSelect.value = whitelistMode;
-      themeColorInput.value = themeColor;
-      render();
-    });
+  chrome.storage.sync.get(SETTING_KEYS, (data) => {
+    blockedRegions = data.blockedRegions || [];
+    blockMode = data.blockMode || 'overlay';
+    blockAffiliate = !!data.blockAffiliate;
+    blockAffiliated = !!data.blockAffiliated;
+    whitelistMode = data.whitelistMode || 'mutuals';
+    showLabels = data.showLabels !== false;
+    followersMode = data.followersMode || (data.showFollowers === false ? 'off' : 'nofollowback');
+    showRelation = data.showRelation !== false;
+    relOnlyFollowing = data.relOnlyFollowing !== false;
+    themeColor = data.themeColor || '#ff2222';
+    labelColor = data.labelColor || '#22c55e';
+
+    blockAffiliateCheck.checked = blockAffiliate;
+    blockAffiliatedCheck.checked = blockAffiliated;
+    showLabelsCheck.checked = showLabels;
+    followersSelect.value = followersMode;
+    showRelationCheck.checked = showRelation;
+    relOnlyFollowingCheck.checked = relOnlyFollowing;
+    whitelistSelect.value = whitelistMode;
+    themeColorInput.value = themeColor;
+    labelColorInput.value = labelColor;
+    unfollowMax.value = data.unfollowMax != null ? data.unfollowMax : 50;
+    unfollowSkip.value = data.unfollowSkip || '';
+    render();
+  });
 }
 
 function render() {
@@ -99,7 +121,7 @@ function showToast(msg) {
   toast.textContent = msg;
   toast.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+  toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
 }
 
 addBtn.addEventListener('click', () => { addRegion(regionInput.value); regionInput.value = ''; regionInput.focus(); });
@@ -117,20 +139,44 @@ clearBtn.addEventListener('click', () => {
   showToast('Cleared all regions');
 });
 
-blockAffiliateCheck.addEventListener('change', e => {
-  blockAffiliate = e.target.checked; saveAndSync();
-  showToast(blockAffiliate ? 'Affiliate blocking on' : 'Affiliate blocking off');
-});
-blockAffiliatedCheck.addEventListener('change', e => {
-  blockAffiliated = e.target.checked; saveAndSync();
-  showToast(blockAffiliated ? 'Affiliated-badge blocking on' : 'Affiliated-badge blocking off');
-});
-showLabelsCheck.addEventListener('change', e => {
-  showLabels = e.target.checked; saveAndSync();
-  showToast(showLabels ? 'Region labels on' : 'Region labels off');
-});
+blockAffiliateCheck.addEventListener('change', e => { blockAffiliate = e.target.checked; saveAndSync(); });
+blockAffiliatedCheck.addEventListener('change', e => { blockAffiliated = e.target.checked; saveAndSync(); });
+showLabelsCheck.addEventListener('change', e => { showLabels = e.target.checked; saveAndSync(); });
+followersSelect.addEventListener('change', e => { followersMode = e.target.value; saveAndSync(); });
+showRelationCheck.addEventListener('change', e => { showRelation = e.target.checked; saveAndSync(); });
+relOnlyFollowingCheck.addEventListener('change', e => { relOnlyFollowing = e.target.checked; saveAndSync(); });
 whitelistSelect.addEventListener('change', e => { whitelistMode = e.target.value; saveAndSync(); });
-labelColorInput.addEventListener('input', e => { labelColor = e.target.value; saveAndSync(); });
 themeColorInput.addEventListener('input', e => { themeColor = e.target.value; saveAndSync(); });
+labelColorInput.addEventListener('input', e => { labelColor = e.target.value; saveAndSync(); });
+
+// ── Unfollow non-followers ──
+unfollowMax.addEventListener('change', () => chrome.storage.sync.set({ unfollowMax: parseInt(unfollowMax.value, 10) || 0 }));
+unfollowSkip.addEventListener('change', () => chrome.storage.sync.set({ unfollowSkip: unfollowSkip.value }));
+
+async function activeTab() {
+  const [t] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return t;
+}
+
+$('unfollowStart').addEventListener('click', async () => {
+  const t = await activeTab();
+  if (!t || !/^https:\/\/(x|twitter)\.com\/[^/?#]+\/following\/?([?#]|$)/.test(t.url || '')) {
+    showToast('Open your Following page first');
+    return;
+  }
+  const max = parseInt(unfollowMax.value, 10) || 0;
+  const skip = unfollowSkip.value.split(/[,\s]+/).filter(Boolean);
+  if (!confirm(`Unfollow up to ${max || 'ALL'} accounts that don't follow you back?\n\nIt runs slowly on purpose, and you can stop it any time.`)) return;
+  chrome.tabs.sendMessage(t.id, { type: 'XRB_UNFOLLOW_START', max, skip }, res => {
+    if (chrome.runtime.lastError || !res) showToast('Reload the X tab first');
+    else showToast(res.ok ? 'Started — see panel on page' : res.error);
+  });
+});
+
+$('unfollowStop').addEventListener('click', async () => {
+  const t = await activeTab();
+  if (t) chrome.tabs.sendMessage(t.id, { type: 'XRB_UNFOLLOW_STOP' }, () => { void chrome.runtime.lastError; });
+  showToast('Stopping…');
+});
 
 loadSettings();

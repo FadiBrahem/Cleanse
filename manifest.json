@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Cleanse (X Region Blocker)",
-  "version": "1.1.0",
+  "version": "1.5.0",
   "minimum_chrome_version": "111",
   "description": "Cleanse — filter posts on X by account region and affiliate content, and show each account's region next to its name.",
   "permissions": ["storage", "scripting"],

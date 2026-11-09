@@ -193,12 +193,97 @@ function getHandleIO() {
 }
 
 // Only X's real "Account based in" value is ever displayed
-function labelInfo(u) {
-    const e = memCache.get(u);
-    return e && e.country ? { text: e.country } : null;
+// Keep it to the plain region/country name: drop "(Connected via …)"-style extras
+function cleanRegion(s) {
+    return String(s).replace(/\s*\(.*?\)\s*/g, ' ').replace(/connected via.*$/i, '').replace(/\s+/g, ' ').trim();
 }
 
-const labelOf = new WeakMap();   // handle <span> -> its label element
+function labelInfo(u) {
+    const e = memCache.get(u);
+    if (!e || !e.country) return null;
+    const text = cleanRegion(e.country);
+    return text ? { text, raw: e.country } : null;
+}
+
+// X renders the handle more than once per header; one chip/label per user per header
+function containerFor(span) {
+    return span.closest('[data-testid="User-Name"], [data-testid="UserName"], [data-testid="UserCell"], [data-testid="conversation"], article')
+        || span.parentElement;
+}
+
+const labelOf = new WeakMap();   // handle <span> -> its region label element
+const chipOf = new WeakMap();    // handle <span> -> its followers chip element
+
+function fmtCount(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K';
+    return String(n);
+}
+
+// Follower count chip, placed right after the DISPLAY NAME (not the handle)
+function decorateFollowers(span, u) {
+    const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
+    if (!cont) return;
+    let chip = cont.querySelector(`.xrb-followers-chip[data-user="${u}"]`);
+    const n = followersCache.get(u);
+
+    let want = false;
+    if (typeof n === 'number') {
+        if (followersMode === 'always') want = true;
+        else if (followersMode === 'nofollowback') want = chipContext(span) && relStatus(u) === 'not';
+    }
+    if (!want) { if (chip) chip.remove(); return; }
+
+    const nameBlock = cont.firstElementChild;
+    if (!nameBlock) return;
+    if (!chip) {
+        const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
+            s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
+        if (!nameSpan) return;
+        chip = document.createElement('span');
+        chip.className = 'xrb-followers-chip';
+        chip.dataset.user = u;
+        placeLabel(nameSpan, chip);
+    }
+    const text = '👥 ' + fmtCount(n);
+    if (chip.textContent !== text) chip.textContent = text;
+    chip.title = `${n.toLocaleString()} followers`;
+}
+
+// Timeline-style headers only: never on Following/Followers lists, user cells or DM lists
+function chipContext(span) {
+    if (LIST_PATH.test(window.location.pathname)) return false;
+    if (span.closest('[data-testid="UserCell"], [data-testid="conversation"]')) return false;
+    return !!span.closest('[data-testid="User-Name"]');
+}
+
+// 'follows' | 'not' | null (unknown / not applicable)
+function relStatus(u) {
+    if (!u || u === ownUsername) return null;
+    const r = relCache.get(u);
+    if (!r || typeof r.followedBy !== 'boolean') return null;
+    if (relOnlyFollowing && r.following !== true) return null;
+    return r.followedBy ? 'follows' : 'not';
+}
+
+function decorateRelation(span, u) {
+    const holder = containerFor(span);
+    let chip = holder.querySelector(`.xrb-rel-chip[data-user="${u}"]`);
+    const st = showRelation && chipContext(span) ? relStatus(u) : null;
+    if (!st) { if (chip) chip.remove(); return; }
+    if (!chip) {
+        chip = document.createElement('span');
+        chip.className = 'xrb-rel-chip';
+        chip.dataset.user = u;
+        const lab = holder.querySelector(`.xrb-region-label[data-user="${u}"]`);
+        if (lab) lab.insertAdjacentElement('afterend', chip); else placeLabel(span, chip);
+    }
+    chip.classList.toggle('xrb-rel-chip--yes', st === 'follows');
+    chip.classList.toggle('xrb-rel-chip--no', st === 'not');
+    const text = st === 'follows' ? '✓ Follows you' : '✗ Not following you';
+    if (chip.textContent !== text) chip.textContent = text;
+}
 
 // Put the label in the same flex ROW as the handle (so it sits beside it, not under it):
 // climb from the handle until the parent is a row-direction flex container.
@@ -224,31 +309,36 @@ function decorateHandleEl(span) {
     if (!m) return;
     const u = m[1].toLowerCase();
     if (SKIP.has(u)) return;
-
-    const info = labelInfo(u);
-    if (!info) {
-        if (!span.dataset.xrbIo) { span.dataset.xrbIo = '1'; getHandleIO().observe(span); }
-        return;
-    }
-
     if (!span.parentElement) return;
-    let label = labelOf.get(span);
-    if (!label || !label.isConnected) {
-        label = document.createElement('span');
-        label.className = 'xrb-region-label';
-        labelOf.set(span, label);
-        placeLabel(span, label);
+
+    if (followersMode !== 'off') decorateFollowers(span, u);
+
+    if (showLabels) {
+        const info = labelInfo(u);
+        if (!info) {
+            if (!span.dataset.xrbIo) { span.dataset.xrbIo = '1'; getHandleIO().observe(span); }
+        } else {
+            const holder = containerFor(span);
+            let label = holder.querySelector(`.xrb-region-label[data-user="${u}"]`);
+            if (!label) {
+                label = document.createElement('span');
+                label.className = 'xrb-region-label';
+                label.dataset.user = u;
+                placeLabel(span, label);
+            }
+            const shown = info.text.length > 28 ? info.text.slice(0, 27) + '…' : info.text;
+            const text = '📍 ' + shown;
+            if (label.textContent !== text) label.textContent = text;
+            label.title = `Account based in: ${info.raw}`;
+            label.classList.toggle('xrb-region-label--blocked', isUserBlocked(u));
+        }
     }
-    const shown = info.text.length > 28 ? info.text.slice(0, 27) + '…' : info.text;
-    const text = '📍 ' + shown;
-    if (label.textContent !== text) label.textContent = text;
-    label.dataset.user = u;
-    label.title = `Account based in: ${info.text}`;
-    label.classList.toggle('xrb-region-label--blocked', isUserBlocked(u));
+
+    decorateRelation(span, u);
 }
 
 function decorateWithin(root) {
-    if (!showLabels || !root || root.nodeType !== 1) return;
+    if (!(showLabels || followersMode !== 'off' || showRelation) || !root || root.nodeType !== 1) return;
     if (root.matches && root.matches('div[dir="ltr"] > span')) decorateHandleEl(root);
     root.querySelectorAll('div[dir="ltr"] > span').forEach(decorateHandleEl);
 }
@@ -364,7 +454,7 @@ function scanAll() {
 }
 
 function clearVisualTreatments() {
-    document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label').forEach(el => el.remove());
+    document.querySelectorAll('.xrb-banner, .xrb-red-circle, .xrb-overlay, .xrb-profile-no-symbol, .xrb-region-label, .xrb-followers-chip, .xrb-rel-chip').forEach(el => el.remove());
     document.querySelectorAll('[data-xrb-circle], [data-xrb-profile-circle]').forEach(el => {
         delete el.dataset.xrbCircle;
         delete el.dataset.xrbProfileCircle;

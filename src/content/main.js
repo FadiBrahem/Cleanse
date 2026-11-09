@@ -1,6 +1,6 @@
 function loadSettings(cb) {
     chrome.storage.sync.get(
-        ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor'],
+        ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'],
         data => {
             blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim()).filter(Boolean);
             compileRegions();
@@ -9,6 +9,9 @@ function loadSettings(cb) {
             blockAffiliated = !!data.blockAffiliated;
             whitelistMode = data.whitelistMode || 'mutuals';
             showLabels = data.showLabels !== false;
+            followersMode = data.followersMode || (data.showFollowers === false ? 'off' : 'nofollowback');
+            showRelation = data.showRelation !== false;
+            relOnlyFollowing = data.relOnlyFollowing !== false;
             themeColor = data.themeColor || '#ff2222';
             labelColor = data.labelColor || '#22c55e';
             applyThemeStyle();
@@ -18,7 +21,7 @@ function loadSettings(cb) {
 
 chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'sync') return;
-    const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor'];
+    const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
     if (!keys.some(k => changes[k])) return;
     loadSettings(() => {
         pendingUsernames.clear();
@@ -38,7 +41,8 @@ function listenToInjector() {
 
         switch (type) {
             case 'user_info': {
-                const { username, location, following, followedBy, affiliated } = payload;
+                const { username, location, following, followedBy, affiliated, followers } = payload;
+                if (typeof followers === 'number') followersCache.set(username, followers);
                 if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
                     if (updateRel(username, following, followedBy)) scheduleFullRefresh();
                 }
@@ -90,6 +94,7 @@ async function init() {
     loadSettings(() => {
         detectOwnUsername();
         listenToInjector();
+        initUnfollowListener();
         startObserver();
         startIntersectionObserver();
         startIntervalScan();

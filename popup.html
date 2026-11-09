@@ -474,6 +474,22 @@
           Show region next to @handle everywhere
         </label>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <span style="font-size:11px;color:var(--text-dim);">Follower count:</span>
+          <select id="followersSelect" style="flex:1;max-width:190px;padding:5px 6px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:11px;">
+            <option value="nofollowback">Only if they don't follow back</option>
+            <option value="always">Always</option>
+            <option value="off">Off</option>
+          </select>
+        </div>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;color:var(--text);">
+          <input type="checkbox" id="showRelationCheck" style="accent-color: var(--red); cursor: pointer;" />
+          Tag <span style="color:#22c55e">Follows you</span> / <span style="color:#ff4444">Not following you</span> (timeline only)
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer;color:var(--text);">
+          <input type="checkbox" id="relOnlyFollowingCheck" style="accent-color: var(--red); cursor: pointer;" />
+          ...only for accounts I follow
+        </label>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
           <span style="font-size:11px;color:var(--text-dim);">Region label color:</span>
           <input type="color" id="labelColorInput" value="#22c55e" style="cursor:pointer;width:30px;height:24px;border:none;border-radius:4px;padding:0;background:transparent;" title="Color of the region label next to @handles" />
         </div>
@@ -507,6 +523,20 @@
       <div class="footer">
         <div class="count-badge"><span id="blockedCount">0</span> region(s) active</div>
         <button class="clear-btn" id="clearBtn">Clear all</button>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-label">Unfollow Non-Followers</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">Open your own <b>Following</b> page, then start. Mutuals are kept. Runs slowly on purpose.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+        <span style="font-size:11px;color:var(--text-dim);">Max this run (0 = all):</span>
+        <input class="region-input" id="unfollowMax" type="number" min="0" value="50" style="flex:none;width:70px;" />
+      </div>
+      <input class="region-input" id="unfollowSkip" type="text" placeholder="Never unfollow (comma separated @users)" style="width:100%;margin-bottom:8px;" />
+      <div style="display:flex;gap:6px;">
+        <button class="add-btn" id="unfollowStart" style="flex:1;">Start</button>
+        <button class="add-btn" id="unfollowStop" style="flex:1;background:var(--surface2);border:1px solid var(--border);">Stop</button>
       </div>
     </div>
 

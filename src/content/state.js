@@ -13,13 +13,17 @@ let blockAffiliate = false;      // posts with affiliate links / disclosures (+ 
 let blockAffiliated = false;     // accounts wearing an X "affiliated with" badge
 let whitelistMode = 'mutuals';   // 'mutuals' | 'following' | 'none'
 let showLabels = true;
+let followersMode = 'nofollowback';   // 'nofollowback' | 'always' | 'off'
+let showRelation = true;               // green "Follows you" / red "Not following you" (timeline only)
+let relOnlyFollowing = true;           // ...only for accounts I follow
 let themeColor = '#ff2222';
 let labelColor = '#22c55e';      // region label colour (popup option)
 
 // ── Runtime data ──
 const memCache = new Map();          // username -> { country, ts, src }
 const profileLoc = new Map();        // username -> self-written profile location (free text)
-const relCache = new Map();          // username -> { following, followedBy }
+const relCache = new Map();
+const followersCache = new Map();   // username -> follower count          // username -> { following, followedBy }
 const affiliatedUsers = new Set();
 const affiliateUserCounts = new Map();
 const affiliateTweetIds = new Set();
@@ -51,6 +55,8 @@ const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'search',
     'who_to_follow', 'topics', 'connect_people', 'jobs', 'communities', 'premium']);
 
 const HANDLE_RE = /^@([A-Za-z0-9_]{1,15})$/;
+const LIST_PATH = /^\/[^/]+\/(following|followers|verified_followers|followers_you_follow)\/?$/;
+const REL_KEY = 'xrb_rel_cache_v1';
 const SENSITIVE_PATH = /^\/(notifications|messages|i\/chat)/;
 const ARTICLE_SEL = 'article[data-testid="tweet"], article[role="article"]';
 
@@ -102,6 +108,7 @@ function updateRel(u, following, followedBy) {
         following: typeof following === 'boolean' ? following : prev.following,
         followedBy: typeof followedBy === 'boolean' ? followedBy : prev.followedBy
     });
+    persistRel(u);
     return before !== key();
 }
 

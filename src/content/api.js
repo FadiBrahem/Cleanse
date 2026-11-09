@@ -41,6 +41,8 @@ function lookupsPaused() {
 }
 
 function ingestUserResult(username, result) {
+    const fc = result?.legacy?.followers_count;
+    if (typeof fc === 'number') followersCache.set(username, fc);
     const rp = result?.relationship_perspectives || {};
     const following = rp.following ?? result?.legacy?.following;
     const followedBy = rp.followed_by ?? result?.legacy?.followed_by;
