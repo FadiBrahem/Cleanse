@@ -1,27 +1,30 @@
+const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
+    'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+
 function loadSettings(cb) {
-    chrome.storage.sync.get(
-        ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'],
-        data => {
-            blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim()).filter(Boolean);
-            compileRegions();
-            blockMode = data.blockMode || 'overlay';
-            blockAffiliate = !!data.blockAffiliate;
-            blockAffiliated = !!data.blockAffiliated;
-            whitelistMode = data.whitelistMode || 'mutuals';
-            showLabels = data.showLabels !== false;
-            followersMode = data.followersMode || (data.showFollowers === false ? 'off' : 'nofollowback');
-            showRelation = data.showRelation !== false;
-            relOnlyFollowing = data.relOnlyFollowing !== false;
-            themeColor = data.themeColor || '#ff2222';
-            labelColor = data.labelColor || '#22c55e';
-            applyThemeStyle();
-            if (cb) cb();
-        });
+    chrome.storage.sync.get(SETTING_KEYS, data => {
+        blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim()).filter(Boolean);
+        compileRegions();
+        blockMode = data.blockMode || 'overlay';
+        blockAffiliate = !!data.blockAffiliate;
+        blockAffiliated = !!data.blockAffiliated;
+        whitelistMode = data.whitelistMode || 'mutuals';
+        showLabels = data.showLabels !== false;
+        followersMode = data.followersMode || (data.showFollowers === false ? 'off' : 'nofollowback');
+        showRelation = data.showRelation !== false;
+        relOnlyFollowing = data.relOnlyFollowing !== false;
+        themeColor = data.themeColor || '#ff2222';
+        labelColor = data.labelColor || '#22c55e';
+        applyThemeStyle();
+        if (cb) cb();
+    });
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
+    if (!alive()) return;
     if (area !== 'sync') return;
-    const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+    const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
+        'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
     if (!keys.some(k => changes[k])) return;
     loadSettings(() => {
         pendingUsernames.clear();
@@ -34,6 +37,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 function listenToInjector() {
     window.addEventListener(CHANNEL, e => {
+        if (!alive()) { shutdown(); return; }
         let msg = e.detail;
         try { if (typeof msg === 'string') msg = JSON.parse(msg); } catch (_) { return; }
         const { type, payload } = msg || {};
@@ -42,7 +46,7 @@ function listenToInjector() {
         switch (type) {
             case 'user_info': {
                 const { username, location, following, followedBy, affiliated, followers } = payload;
-                if (typeof followers === 'number') followersCache.set(username, followers);
+                if (typeof followers === 'number') { followersCache.set(username, followers); persistRel(username); }
                 if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
                     if (updateRel(username, following, followedBy)) scheduleFullRefresh();
                 }
@@ -67,7 +71,13 @@ function listenToInjector() {
                 }
                 break;
             case 'query_template':
-                if (payload.hash) {
+                if (payload.op === 'UserByScreenName' && payload.hash) {
+                    userTemplate.hash = payload.hash;
+                    userTemplate.features = payload.features || null;
+                    userTemplate.fieldToggles = payload.fieldToggles || null;
+                    userTemplate.variables = payload.variables || null;
+                    saveTemplate();
+                } else if (payload.hash) {
                     aboutTemplate.hash = payload.hash;
                     if (payload.features) aboutTemplate.features = payload.features;
                     if (payload.fieldToggles) aboutTemplate.fieldToggles = payload.fieldToggles;
@@ -90,8 +100,10 @@ function listenToInjector() {
 }
 
 async function init() {
+    document.documentElement.dataset.xrbInstance = INSTANCE_ID;   // claim the page: older instances will see this and stop
     await loadDiskCache();
     loadSettings(() => {
+        clearVisualTreatments();                                    // remove anything left behind by an older instance
         detectOwnUsername();
         listenToInjector();
         initUnfollowListener();
@@ -107,8 +119,9 @@ async function init() {
         setTimeout(scanAll, 3000);
         setTimeout(checkProfilePage, 1000);
         setTimeout(checkProfilePage, 2500);
+        resumePendingUnfollow();
     });
-    console.log('[XRB] v1.1 ready');
+    console.log('[XRB] v1.7 ready');
 }
 
 init();

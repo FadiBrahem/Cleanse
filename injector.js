@@ -45,6 +45,33 @@
     return false;
   }
 
+  // X moved/removed `legacy.followers_count` in timeline payloads (legacy can be empty), so search the whole user object.
+  function findFollowers(o) {
+    const q = [[o, 0]];
+    while (q.length) {
+      const [x, d] = q.shift();
+      for (const k of Object.keys(x)) {
+        const v = x[k];
+        if (typeof v === 'number' && /^(?:normal_)?followers(?:_count)?$/i.test(k)) return v;
+        if (v && typeof v === 'object' && !Array.isArray(v) && d < 3) q.push([v, d + 1]);
+      }
+    }
+    return undefined;
+  }
+  function numericPaths(o) {
+    const out = [];
+    const q = [['', o, 0]];
+    while (q.length && out.length < 14) {
+      const [p, x, d] = q.shift();
+      for (const k of Object.keys(x)) {
+        const v = x[k];
+        if (typeof v === 'number') out.push(p + k + '=' + v);
+        else if (v && typeof v === 'object' && !Array.isArray(v) && d < 2) q.push([p + k + '.', v, d + 1]);
+      }
+    }
+    return out;
+  }
+
   // ── User extraction (handles both old `legacy` and new `core` schemas) ──
   function userFrom(o) {
     if (!o || typeof o !== 'object') return null;
@@ -63,7 +90,8 @@
       following: bool(rp.following ?? o.legacy?.following ?? o.following),
       followedBy: bool(rp.followed_by ?? o.legacy?.followed_by ?? o.followed_by),
       affiliated: !!(lab && typeof lab === 'object' && Object.keys(lab).length),
-      followers: (() => { const n = o.legacy?.followers_count ?? o.followers_count ?? o.legacy?.normal_followers_count ?? o.public_metrics?.followers_count ?? o.counts?.followers; return typeof n === 'number' ? n : undefined; })()
+      followers: findFollowers(o),
+      restId: o.rest_id ? String(o.rest_id) : undefined
     };
   }
 
@@ -79,12 +107,13 @@
   }
 
   function learnTemplate(g) {
-    if (g.op !== 'AboutAccountQuery') return;
+    if (g.op !== 'AboutAccountQuery' && g.op !== 'UserByScreenName') return;
     emit('query_template', {
       op: g.op,
       hash: g.hash,
       features: g.u.searchParams.get('features'),
-      fieldToggles: g.u.searchParams.get('fieldToggles')
+      fieldToggles: g.u.searchParams.get('fieldToggles'),
+      variables: g.u.searchParams.get('variables')
     });
   }
 
@@ -127,8 +156,8 @@
           }
           if (u.followers === undefined && dbgNoFollowers < 3) {
             dbgNoFollowers++;
-            console.warn('[XRB-INJECT] user object without follower count:', u.username,
-              'keys:', Object.keys(obj), 'legacy keys:', Object.keys(obj.legacy || {}));
+            console.warn('[XRB-INJECT] no follower count for', u.username,
+              '| keys:', Object.keys(obj).join(','), '| numeric fields:', numericPaths(obj).join(', ') || '(none)');
           }
         }
       }

@@ -419,7 +419,7 @@
       <img src="icons/icon128.png" width="20" height="20" style="display:block;" />
     </div>
     <div class="header-text">
-      <h1>Cleanse <span class="v-badge">v1.1</span></h1>
+      <h1>Cleanse <span class="v-badge">v1.6</span></h1>
       <p>API-Level Location & Affiliates Filtering</p>
     </div>
     <div class="status-dot" id="statusDot"></div>
@@ -528,10 +528,18 @@
 
     <div class="section">
       <div class="section-label">Unfollow Non-Followers</div>
-      <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">Open your own <b>Following</b> page, then start. Mutuals are kept. Runs slowly on purpose.</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-bottom:8px;">Start takes you to your <b>Following</b> page and runs there. Mutuals are kept. Fast/Turbo can trip X's action limits.</div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
         <span style="font-size:11px;color:var(--text-dim);">Max this run (0 = all):</span>
-        <input class="region-input" id="unfollowMax" type="number" min="0" value="50" style="flex:none;width:70px;" />
+        <input class="region-input" id="unfollowMax" type="number" min="0" value="100" style="flex:none;width:70px;" />
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;">
+        <span style="font-size:11px;color:var(--text-dim);">Speed:</span>
+        <select id="unfollowSpeed" style="flex:1;max-width:190px;padding:5px 6px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:11px;">
+          <option value="fast">Fast (~100 / min)</option>
+          <option value="turbo">Turbo (as fast as X allows)</option>
+          <option value="safe">Safe (~15 / min)</option>
+        </select>
       </div>
       <input class="region-input" id="unfollowSkip" type="text" placeholder="Never unfollow (comma separated @users)" style="width:100%;margin-bottom:8px;" />
       <div style="display:flex;gap:6px;">

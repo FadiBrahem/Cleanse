@@ -1,9 +1,9 @@
-// Cleanse (X Region Blocker) v1.5
+// Cleanse (X Region Blocker) v1.7
 // Built from modular src/ — edit src/content/*.js, then run: node build.js
 
 (function () {
   'use strict';
-  if (window.__xrbContentLoaded) return;   // guard against double injection
+  if (window.__xrbContentLoaded) return;   // guard against double injection in the same world
   window.__xrbContentLoaded = true;
 
   // ── state.js ──
@@ -11,6 +11,7 @@
   const READY_EVENT = '__xrb_ready__';
   const CACHE_KEY = 'xrb_location_cache_v3';   // v3: drops entries that may have come from free-text profile locations
   const TEMPLATE_KEY = 'xrb_about_template_v1';
+  const REL_KEY = 'xrb_rel_cache_v1';
   const CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
   const NEG_TTL = 3 * 24 * 60 * 60 * 1000;
 
@@ -23,16 +24,16 @@
   let whitelistMode = 'mutuals';   // 'mutuals' | 'following' | 'none'
   let showLabels = true;
   let followersMode = 'nofollowback';   // 'nofollowback' | 'always' | 'off'
-  let showRelation = true;               // green "Follows you" / red "Not following you" (timeline only)
-  let relOnlyFollowing = true;           // ...only for accounts I follow
+  let showRelation = true;              // green "Follows you" / red "Not following you" (timeline only)
+  let relOnlyFollowing = true;          // ...only for accounts I follow
   let themeColor = '#ff2222';
   let labelColor = '#22c55e';      // region label colour (popup option)
 
   // ── Runtime data ──
   const memCache = new Map();          // username -> { country, ts, src }
-  const profileLoc = new Map();        // username -> self-written profile location (free text)
-  const relCache = new Map();
-  const followersCache = new Map();   // username -> follower count          // username -> { following, followedBy }
+  const profileLoc = new Map();        // username -> self-written profile location (free text; blocking fallback only)
+  const relCache = new Map();          // username -> { following, followedBy }
+  const followersCache = new Map();    // username -> follower count
   const affiliatedUsers = new Set();
   const affiliateUserCounts = new Map();
   const affiliateTweetIds = new Set();
@@ -50,6 +51,17 @@
   let activeRequests = 0;
   let nativeAboutAt = 0;               // last time X itself called/showed AboutAccountQuery
 
+  // UserByScreenName template (learned from X's own profile requests) — used only to fetch follower counts
+  const userTemplate = { hash: null, features: null, fieldToggles: null, variables: null };
+  let userRateLimitedUntil = 0;
+  const followersQueue = [];
+  const followersQueueSet = new Set();
+  const followersTried = new Set();
+  const followerStamps = [];
+  let followersRunning = false;
+  const FOLLOWERS_BUDGET = 60;                  // max follower lookups per 15 min
+  const FOLLOWERS_WINDOW = 15 * 60 * 1000;
+
   const aboutTemplate = {
       hash: 'XRqGa7EeokUU5kppkh13EA',   // last-resort default; real hash is learned from X's traffic / bundle
       features: null,
@@ -65,9 +77,24 @@
 
   const HANDLE_RE = /^@([A-Za-z0-9_]{1,15})$/;
   const LIST_PATH = /^\/[^/]+\/(following|followers|verified_followers|followers_you_follow)\/?$/;
-  const REL_KEY = 'xrb_rel_cache_v1';
   const SENSITIVE_PATH = /^\/(notifications|messages|i\/chat)/;
   const ARTICLE_SEL = 'article[data-testid="tweet"], article[role="article"]';
+
+  // ── Instance identity: after an extension reload the OLD content script keeps running in open tabs.
+  //    Each instance stamps the page; any instance that no longer owns the stamp (or lost chrome.runtime) shuts itself down.
+  const INSTANCE_ID = Date.now() + '-' + Math.random().toString(36).slice(2);
+  const teardown = [];
+  let dead = false;
+  function alive() {
+      try { return !!chrome.runtime?.id && document.documentElement.dataset.xrbInstance === INSTANCE_ID; }
+      catch (e) { return false; }
+  }
+  function shutdown() {
+      if (dead) return;
+      dead = true;
+      teardown.forEach(f => { try { f(); } catch (e) { } });
+      console.log('[XRB] stale instance shut down');
+  }
 
   let lastPath = '';
 
@@ -152,14 +179,14 @@
   // ── cache.js ──
   const pendingDisk = new Map();
   const pendingRel = new Map();
-  let relTimer = null;
   let diskTimer = null;
+  let relTimer = null;
   let refreshTimer = null;
   let fullRefreshTimer = null;
 
   async function loadDiskCache() {
       try {
-          const stored = await chrome.storage.local.get([CACHE_KEY, TEMPLATE_KEY]);
+          const stored = await chrome.storage.local.get([CACHE_KEY, TEMPLATE_KEY, 'xrb_own']);
           const raw = stored[CACHE_KEY] || {};
           const now = Date.now();
           let loaded = 0;
@@ -170,24 +197,29 @@
           try {
               const rs = (await chrome.storage.local.get(REL_KEY))[REL_KEY] || {};
               for (const [u, e] of Object.entries(rs)) {
-                  if (now - e.ts < 7 * 24 * 60 * 60 * 1000) relCache.set(u, { following: e.f, followedBy: e.fb });
+                  if (now - e.ts >= 7 * 24 * 60 * 60 * 1000) continue;
+                  if (typeof e.fb === 'boolean' || typeof e.f === 'boolean') relCache.set(u, { following: e.f, followedBy: e.fb });
+                  if (typeof e.c === 'number') followersCache.set(u, e.c);
               }
           } catch (e) { }
+          if (stored.xrb_own && !ownUsername) ownUsername = stored.xrb_own;
           const t = stored[TEMPLATE_KEY];
           if (t && t.hash) {
               aboutTemplate.hash = t.hash;
               aboutTemplate.features = t.features || null;
               aboutTemplate.fieldToggles = t.fieldToggles || null;
           }
+          if (t && t.user && t.user.hash) Object.assign(userTemplate, t.user);
           console.log('[XRB] Cache loaded:', loaded, 'entries');
       } catch (e) { }
   }
 
   // Follow relationships learned from X's data or from your Following/Followers pages (kept 7 days)
   function persistRel(u) {
-      const r = relCache.get(u);
-      if (!r || typeof r.followedBy !== 'boolean') return;
-      pendingRel.set(u, { f: r.following, fb: r.followedBy, ts: Date.now() });
+      const r = relCache.get(u) || {};
+      const c = followersCache.get(u);
+      if (typeof r.followedBy !== 'boolean' && typeof c !== 'number') return;
+      pendingRel.set(u, { f: r.following, fb: r.followedBy, c, ts: Date.now() });
       if (!relTimer) relTimer = setTimeout(flushRel, 4000);
   }
 
@@ -207,7 +239,7 @@
   }
 
   function saveTemplate() {
-      try { chrome.storage.local.set({ [TEMPLATE_KEY]: { ...aboutTemplate } }); } catch (e) { }
+      try { chrome.storage.local.set({ [TEMPLATE_KEY]: { ...aboutTemplate, user: { ...userTemplate } } }); } catch (e) { }
   }
 
   // Writes are batched: one read-modify-write per 3s instead of one per lookup
@@ -243,6 +275,7 @@
   function scheduleRefresh() {
       clearTimeout(refreshTimer);
       refreshTimer = setTimeout(() => {
+          if (!alive()) return;
           if (blockedRegions.length) rescanDOM();
           decorateWithin(document.body);
           checkProfilePage();
@@ -253,6 +286,7 @@
   function scheduleFullRefresh() {
       clearTimeout(fullRefreshTimer);
       fullRefreshTimer = setTimeout(() => {
+          if (!alive()) return;
           clearVisualTreatments();
           scanAll();
           decorateWithin(document.body);
@@ -304,9 +338,32 @@
       return now < rateLimitedUntil || now - nativeAboutAt < 20000 || document.hidden || isAboutOpen();
   }
 
+  function findFollowersDeep(o) {
+      const q = [[o, 0]];
+      while (q.length) {
+          const [x, d] = q.shift();
+          for (const k of Object.keys(x)) {
+              const v = x[k];
+              if (typeof v === 'number' && /^(?:normal_)?followers(?:_count)?$/i.test(k)) return v;
+              if (v && typeof v === 'object' && !Array.isArray(v) && d < 3) q.push([v, d + 1]);
+          }
+      }
+      return undefined;
+  }
+
+  function xHeaders() {
+      return {
+          'authorization': `Bearer ${BEARER}`,
+          'x-csrf-token': getCsrfToken(),
+          'x-twitter-active-user': 'yes',
+          'x-twitter-auth-type': 'OAuth2Session',
+          'x-twitter-client-language': 'en'
+      };
+  }
+
   function ingestUserResult(username, result) {
-      const fc = result?.legacy?.followers_count;
-      if (typeof fc === 'number') followersCache.set(username, fc);
+      const fc = findFollowersDeep(result);
+      if (typeof fc === 'number') { followersCache.set(username, fc); persistRel(username); }
       const rp = result?.relationship_perspectives || {};
       const following = rp.following ?? result?.legacy?.following;
       const followedBy = rp.followed_by ?? result?.legacy?.followed_by;
@@ -403,6 +460,7 @@
       queueRunning = true;
       try {
           while (lookupQueue.length > 0) {
+              if (!alive()) break;
               if (lookupsPaused()) break;                          // interval scan resumes us
               if (activeRequests >= MAX_CONCURRENT) { await sleep(300); continue; }
               const username = lookupQueue.pop();                  // newest first = what's on screen now
@@ -415,6 +473,64 @@
       } finally {
           queueRunning = false;
       }
+  }
+
+  // ── Follower counts: X no longer ships them in timeline data, so fetch per account (only for accounts that need
+  //    a chip, only ones near the viewport, ≤60 per 15 min). Uses the UserByScreenName request shape X itself used. ──
+  function followersBudgetOk() {
+      const now = Date.now();
+      while (followerStamps.length && now - followerStamps[0] > FOLLOWERS_WINDOW) followerStamps.shift();
+      return followerStamps.length < FOLLOWERS_BUDGET;
+  }
+
+  function queueFollowers(u) {
+      if (!userTemplate.hash || !userTemplate.variables) return;       // learned after X loads any profile
+      if (followersCache.has(u) || followersTried.has(u) || followersQueueSet.has(u)) return;
+      if (Date.now() < userRateLimitedUntil) return;
+      if (followersQueue.length >= 40) followersQueueSet.delete(followersQueue.shift());
+      followersQueue.push(u);
+      followersQueueSet.add(u);
+      if (!followersRunning) drainFollowers();
+  }
+
+  async function drainFollowers() {
+      if (followersRunning) return;
+      followersRunning = true;
+      try {
+          while (followersQueue.length) {
+              if (!alive() || document.hidden || Date.now() < userRateLimitedUntil || !followersBudgetOk()) break;
+              const u = followersQueue.pop();                           // newest = what's on screen
+              followersQueueSet.delete(u);
+              if (followersCache.has(u)) continue;
+              await lookupFollowers(u);
+              await sleep(2500 + Math.random() * 1500);
+          }
+      } finally {
+          followersRunning = false;
+      }
+  }
+
+  async function lookupFollowers(u) {
+      followersTried.add(u);
+      followerStamps.push(Date.now());
+      try {
+          let vars;
+          try { vars = JSON.parse(userTemplate.variables); } catch (e) { return; }
+          let set = false;
+          for (const k of Object.keys(vars)) if (/^screen_?name$/i.test(k)) { vars[k] = u; set = true; }
+          if (!set) return;
+          let url = `https://x.com/i/api/graphql/${userTemplate.hash}/UserByScreenName?variables=${encodeURIComponent(JSON.stringify(vars))}`;
+          if (userTemplate.features) url += `&features=${encodeURIComponent(userTemplate.features)}`;
+          if (userTemplate.fieldToggles) url += `&fieldToggles=${encodeURIComponent(userTemplate.fieldToggles)}`;
+          const res = await fetch(url, { headers: xHeaders(), credentials: 'include' });
+          if (res.status === 429) { userRateLimitedUntil = Date.now() + 15 * 60 * 1000; followersTried.delete(u); return; }
+          if (!res.ok) return;
+          const data = await res.json();
+          const result = data?.data?.user?.result || data?.data?.user_result_by_screen_name?.result;
+          if (!result) return;
+          ingestUserResult(u, result);
+          scheduleDecorate(document.body);
+      } catch (e) { }
   }
 
 
@@ -459,7 +575,10 @@
   function detectOwnUsername() {
       const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
       const m = a && (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]+)/);
-      if (m) ownUsername = m[1].toLowerCase();
+      if (m && ownUsername !== m[1].toLowerCase()) {
+          ownUsername = m[1].toLowerCase();
+          try { chrome.storage.local.set({ xrb_own: ownUsername }); } catch (e) { }
+      }
   }
 
   // ───────────────────────── Treatments ─────────────────────────
@@ -594,14 +713,15 @@
       }
   }
 
-  // ───────────────────────── Region labels ─────────────────────────
-  // Works anywhere an "@handle" is rendered: timeline, replies, profile header, follower lists,
-  // search, hover cards, notifications and the DM inbox/thread header.
+  // ───────────────────────── Labels & chips ─────────────────────────
+  // Region label, follower count and follow-back tag next to names/handles.
+  // Works anywhere an "@handle" is rendered; the follow-back tag and "not following back" count are timeline-only.
 
   let handleIO = null;
   function getHandleIO() {
       if (handleIO) return handleIO;
       handleIO = new IntersectionObserver(entries => {
+          if (!alive()) { shutdown(); return; }
           entries.forEach(e => {
               if (!e.isIntersecting) return;
               handleIO.unobserve(e.target);
@@ -610,15 +730,16 @@
               if (m && !memCache.has(m[1].toLowerCase())) queueLookup(m[1]);
           });
       }, { rootMargin: '200px 0px' });
+      teardown.push(() => handleIO && handleIO.disconnect());
       return handleIO;
   }
 
-  // Only X's real "Account based in" value is ever displayed
   // Keep it to the plain region/country name: drop "(Connected via …)"-style extras
   function cleanRegion(s) {
       return String(s).replace(/\s*\(.*?\)\s*/g, ' ').replace(/connected via.*$/i, '').replace(/\s+/g, ' ').trim();
   }
 
+  // Only X's real "Account based in" value is ever displayed
   function labelInfo(u) {
       const e = memCache.get(u);
       if (!e || !e.country) return null;
@@ -626,50 +747,51 @@
       return text ? { text, raw: e.country } : null;
   }
 
-  // X renders the handle more than once per header; one chip/label per user per header
-  function containerFor(span) {
-      return span.closest('[data-testid="User-Name"], [data-testid="UserName"], [data-testid="UserCell"], [data-testid="conversation"], article')
+  // One chip per user per post/cell: scope is the whole post, and any extras are removed on sight
+  function scopeFor(span) {
+      return span.closest('article, [data-testid="cellInnerDiv"], [data-testid="UserCell"], [data-testid="conversation"], [role="dialog"], [data-testid="HoverCard"]')
+          || span.closest('[data-testid="UserName"], [data-testid="User-Name"]')     // profile header (not inside an article)
           || span.parentElement;
   }
+  function uniqueChip(scope, cls, u) {
+      if (!scope) return null;
+      const all = scope.querySelectorAll(`.${cls}[data-user="${u}"]`);
+      for (let i = 1; i < all.length; i++) all[i].remove();
+      return all[0] || null;
+  }
 
-  const labelOf = new WeakMap();   // handle <span> -> its region label element
-  const chipOf = new WeakMap();    // handle <span> -> its followers chip element
+  // "Doesn't follow you back": only an explicit followed_by=true counts as following you
+  function notFollowingBack(u) {
+      if (!u || u === ownUsername) return false;
+      const r = relCache.get(u);
+      return !(r && r.followedBy === true);
+  }
+
+  // Put the chip in the same flex ROW as the anchor element (so it sits beside it, not under it):
+  // climb until the parent is a row-direction flex container.
+  function placeLabel(span, label, limit) {
+      let el = span.closest('a') || span;
+      if (limit && !limit.contains(el)) el = span;
+      for (let i = 0; i < 5 && el.parentElement; i++) {
+          const p = el.parentElement;
+          if (limit && !limit.contains(p)) break;                     // never place outside the dedupe scope
+          const cs = getComputedStyle(p);
+          if (cs.display.includes('flex') && cs.flexDirection.startsWith('row')) {
+              el.insertAdjacentElement('afterend', label);
+              return;
+          }
+          if (p.matches('[data-testid="User-Name"], [data-testid="UserName"], article')) break;
+          el = p;
+      }
+      const anchorEl = span.closest('a');
+      (anchorEl && (!limit || limit.contains(anchorEl)) ? anchorEl : span).insertAdjacentElement('afterend', label);
+  }
 
   function fmtCount(n) {
       if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B';
       if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
       if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K';
       return String(n);
-  }
-
-  // Follower count chip, placed right after the DISPLAY NAME (not the handle)
-  function decorateFollowers(span, u) {
-      const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
-      if (!cont) return;
-      let chip = cont.querySelector(`.xrb-followers-chip[data-user="${u}"]`);
-      const n = followersCache.get(u);
-
-      let want = false;
-      if (typeof n === 'number') {
-          if (followersMode === 'always') want = true;
-          else if (followersMode === 'nofollowback') want = chipContext(span) && relStatus(u) === 'not';
-      }
-      if (!want) { if (chip) chip.remove(); return; }
-
-      const nameBlock = cont.firstElementChild;
-      if (!nameBlock) return;
-      if (!chip) {
-          const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
-              s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
-          if (!nameSpan) return;
-          chip = document.createElement('span');
-          chip.className = 'xrb-followers-chip';
-          chip.dataset.user = u;
-          placeLabel(nameSpan, chip);
-      }
-      const text = '👥 ' + fmtCount(n);
-      if (chip.textContent !== text) chip.textContent = text;
-      chip.title = `${n.toLocaleString()} followers`;
   }
 
   // Timeline-style headers only: never on Following/Followers lists, user cells or DM lists
@@ -688,39 +810,58 @@
       return r.followedBy ? 'follows' : 'not';
   }
 
+  // Follower count chip, placed right after the DISPLAY NAME (not the handle)
+  function decorateFollowers(span, u) {
+      const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
+      if (!cont) return;
+      let chip = uniqueChip(scopeFor(span), 'xrb-followers-chip', u);
+      const n = followersCache.get(u);
+      if (typeof n !== 'number' && followersMode !== 'off' && chipContext(span) &&
+          (followersMode === 'always' || notFollowingBack(u))) {
+          const r = span.getBoundingClientRect();                        // only accounts near the screen
+          if (r.bottom > -300 && r.top < window.innerHeight + 300) queueFollowers(u);
+      }
+
+      let want = false;
+      if (typeof n === 'number') {
+          if (followersMode === 'always') want = true;
+          else if (followersMode === 'nofollowback') want = chipContext(span) && notFollowingBack(u);
+      }
+      if (!want) { if (chip) chip.remove(); return; }
+
+      const nameBlock = cont.firstElementChild;
+      if (!nameBlock) return;
+      if (!chip) {
+          const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
+              s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
+          if (!nameSpan) return;
+          chip = document.createElement('span');
+          chip.className = 'xrb-followers-chip';
+          chip.dataset.user = u;
+          placeLabel(nameSpan, chip, scopeFor(span));
+      }
+      const text = '👥 ' + fmtCount(n);
+      if (chip.textContent !== text) chip.textContent = text;
+      chip.title = `${n.toLocaleString()} followers`;
+  }
+
   function decorateRelation(span, u) {
-      const holder = containerFor(span);
-      let chip = holder.querySelector(`.xrb-rel-chip[data-user="${u}"]`);
-      const st = showRelation && chipContext(span) ? relStatus(u) : null;
+      if (!chipContext(span)) return;          // hidden/duplicate handle copies must not add OR remove the chip
+      const holder = scopeFor(span);
+      let chip = uniqueChip(holder, 'xrb-rel-chip', u);
+      const st = showRelation ? relStatus(u) : null;
       if (!st) { if (chip) chip.remove(); return; }
       if (!chip) {
           chip = document.createElement('span');
           chip.className = 'xrb-rel-chip';
           chip.dataset.user = u;
           const lab = holder.querySelector(`.xrb-region-label[data-user="${u}"]`);
-          if (lab) lab.insertAdjacentElement('afterend', chip); else placeLabel(span, chip);
+          if (lab) lab.insertAdjacentElement('afterend', chip); else placeLabel(span, chip, holder);
       }
       chip.classList.toggle('xrb-rel-chip--yes', st === 'follows');
       chip.classList.toggle('xrb-rel-chip--no', st === 'not');
       const text = st === 'follows' ? '✓ Follows you' : '✗ Not following you';
       if (chip.textContent !== text) chip.textContent = text;
-  }
-
-  // Put the label in the same flex ROW as the handle (so it sits beside it, not under it):
-  // climb from the handle until the parent is a row-direction flex container.
-  function placeLabel(span, label) {
-      let el = span.closest('a') || span;
-      for (let i = 0; i < 5 && el.parentElement; i++) {
-          const p = el.parentElement;
-          const cs = getComputedStyle(p);
-          if (cs.display.includes('flex') && cs.flexDirection.startsWith('row')) {
-              el.insertAdjacentElement('afterend', label);
-              return;
-          }
-          if (p.matches('[data-testid="User-Name"], [data-testid="UserName"], article')) break;
-          el = p;
-      }
-      (span.closest('a') || span).insertAdjacentElement('afterend', label);
   }
 
   function decorateHandleEl(span) {
@@ -739,13 +880,13 @@
           if (!info) {
               if (!span.dataset.xrbIo) { span.dataset.xrbIo = '1'; getHandleIO().observe(span); }
           } else {
-              const holder = containerFor(span);
-              let label = holder.querySelector(`.xrb-region-label[data-user="${u}"]`);
+              const holder = scopeFor(span);
+              let label = uniqueChip(holder, 'xrb-region-label', u);
               if (!label) {
                   label = document.createElement('span');
                   label.className = 'xrb-region-label';
                   label.dataset.user = u;
-                  placeLabel(span, label);
+                  placeLabel(span, label, holder);
               }
               const shown = info.text.length > 28 ? info.text.slice(0, 27) + '…' : info.text;
               const text = '📍 ' + shown;
@@ -902,18 +1043,21 @@
           decorateTimer = null;
           const nodes = [...decorateBuf];
           decorateBuf.clear();
+          if (!alive()) return;
           nodes.forEach(n => { if (n.isConnected) decorateWithin(n); });
       }, 150);
   }
 
   function isOwnNode(node) {
       const c = node.classList;
-      return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') || c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
+      return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') ||
+          c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
           c.contains('xrb-banner') || c.contains('xrb-profile-no-symbol'));
   }
 
   function startObserver() {
-      new MutationObserver(mutations => {
+      const mo = new MutationObserver(mutations => {
+          if (!alive()) { shutdown(); return; }
           const newArticles = [];
 
           mutations.forEach(m => {
@@ -940,13 +1084,16 @@
               clearTimeout(window._xrbObsTimer);
               window._xrbObsTimer = setTimeout(() => newArticles.forEach(a => a.isConnected && processArticle(a)), 150);
           }
-      }).observe(document.body, { childList: true, subtree: true });
+      });
+      mo.observe(document.body, { childList: true, subtree: true });
+      teardown.push(() => mo.disconnect());
 
       lastPath = window.location.pathname;
   }
 
   function startIntersectionObserver() {
       const io = new IntersectionObserver(entries => {
+          if (!alive()) { shutdown(); return; }
           entries.forEach(entry => {
               if (!entry.isIntersecting) return;
               const art = entry.target;
@@ -960,7 +1107,9 @@
           });
       }
       observe();
-      new MutationObserver(observe).observe(document.body, { childList: true, subtree: true });
+      const mo2 = new MutationObserver(() => { if (!alive()) { shutdown(); return; } observe(); });
+      mo2.observe(document.body, { childList: true, subtree: true });
+      teardown.push(() => { mo2.disconnect(); io.disconnect(); });
   }
 
   // Articles that are on screen but still unresolved (lookup dropped / paused) get re-queued
@@ -975,7 +1124,8 @@
 
   function startIntervalScan() {
       let tick = 0;
-      setInterval(() => {
+      const iv = setInterval(() => {
+          if (!alive()) { shutdown(); return; }
           tick++;
           detectOwnUsername();
           if (blockedRegions.length || blockAffiliate || blockAffiliated) rescanDOM();
@@ -987,7 +1137,9 @@
           if (tick % 2 === 1) decorateWithin(document.body);
 
           if (lookupQueue.length > 0 && !queueRunning && !lookupsPaused()) drainQueue();
+          if (followersQueue.length > 0 && !followersRunning) drainFollowers();
       }, 1500);
+      teardown.push(() => clearInterval(iv));
   }
 
   // Learn passively from X's own About UI — no request of ours needed
@@ -1011,12 +1163,20 @@
 
 
   // ── unfollow.js ──
-  // ───────────── Unfollow non-followers (runs only on YOUR Following page, started from the popup) ─────────────
+  // ───────────── Unfollow non-followers ─────────────
+  // Started from the popup; takes you to YOUR Following page first, then runs there.
   // Language-independent: uses X's data-testids first; localized texts are only a fallback.
   const UNF_TEXTS = {
       followsYou: ['Follows you', 'Te sigue', 'Segue você', 'Mengikuti Kamu', 'Seni takip ediyor', 'Vous suit', 'Folgt dir', 'يتابعك'],
       following: ['Following', 'Siguiendo', 'Seguindo', 'Mengikuti', 'Takip ediliyor', 'Abonné', 'Abonnement', 'Folge ich', 'Gefolgt', 'متابَع'],
       unfollow: ['Unfollow', 'Dejar de seguir', 'Deixar de Seguir', 'Tidak Mengikuti', 'Takibi bırak', 'Ne plus suivre', 'Entfolgen', 'إلغاء المتابعة']
+  };
+  const PENDING_KEY = 'xrb_pending_unfollow';
+  // safe ≈ 15/min · fast ≈ 100/min · turbo = as fast as X's UI responds
+  const UNF_SPEEDS = {
+      safe:  { pre: 250, poll: 150, post: 400, gap: [1800, 3800], scroll: 1200 },
+      fast:  { pre: 30,  poll: 50,  post: 120, gap: [250, 450],   scroll: 500 },
+      turbo: { pre: 0,   poll: 30,  post: 50,  gap: [0, 40],      scroll: 350 }
   };
   const unf = { running: false, stop: false, done: 0, panel: null };
 
@@ -1045,7 +1205,7 @@
   }
 
   function unfPanel(text, opts = {}) {
-      if (!unf.panel) {
+      if (!unf.panel || !unf.panel.isConnected) {
           const p = document.createElement('div');
           p.id = 'xrb-unfollow-panel';
           p.style.cssText = 'position:fixed;left:16px;bottom:16px;z-index:2147483647;background:#111;color:#eee;border:1px solid #333;border-radius:10px;padding:10px 12px;font:13px -apple-system,Segoe UI,sans-serif;display:flex;gap:10px;align-items:center;box-shadow:0 4px 20px rgba(0,0,0,.5)';
@@ -1063,27 +1223,27 @@
 
   function unfRand(a, b) { return a + Math.random() * (b - a); }
 
-  async function unfollowCell(cell) {
+  async function unfollowCell(cell, sp) {
       cell.scrollIntoView({ block: 'center' });
-      await sleep(250);
+      if (sp.pre) await sleep(sp.pre);
       const btn = cell.querySelector('[data-testid$="-unfollow"]')
           || [...cell.querySelectorAll('[role="button"]')].find(b => UNF_TEXTS.following.includes(b.textContent.trim()));
       if (!btn) return false;
       btn.click();
-      for (let i = 0; i < 20; i++) {                                  // wait up to ~3s for the confirm dialog
-          await sleep(150);
+      for (let i = 0; i < Math.ceil(3000 / sp.poll); i++) {           // wait up to ~3s for the confirm dialog
+          await sleep(sp.poll);
           const confirmBtn = document.querySelector('[data-testid="confirmationSheetConfirm"]')
               || [...document.querySelectorAll('[role="button"]')].find(b => UNF_TEXTS.unfollow.includes(b.textContent.trim()));
-          if (confirmBtn) { confirmBtn.click(); await sleep(400); return true; }
+          if (confirmBtn) { confirmBtn.click(); await sleep(sp.post); return true; }
       }
       return false;
   }
 
-  async function runUnfollow(max, skip) {
+  async function runUnfollow(max, skip, sp) {
       const processed = new Set();
       let idle = 0, failures = 0, reason = 'Finished';
       window.scrollTo(0, 0);
-      await sleep(800);
+      await sleep(sp === UNF_SPEEDS.safe ? 800 : 250);
       try {
           while (!unf.stop && unf.done < max) {
               let newSeen = 0;
@@ -1097,11 +1257,11 @@
                   const follows = unfCellFollowsYou(cell);
                   updateRel(u, true, follows);
                   if (follows) continue;                              // mutual: keep
-                  if (await unfollowCell(cell)) {
+                  if (await unfollowCell(cell, sp)) {
                       unf.done++;
                       failures = 0;
                       unfPanel(`Unfollowed ${unf.done}${max < Infinity ? ' / ' + max : ''}…`);
-                      await sleep(unfRand(1800, 3800));               // human pace: avoids X's action limits
+                      await sleep(unfRand(sp.gap[0], sp.gap[1]));
                   } else if (++failures >= 3) {
                       unf.stop = true;
                       reason = 'Stopped: unfollow button/confirm not found 3×';
@@ -1109,7 +1269,7 @@
               }
               if (unf.stop) break;
               window.scrollBy(0, Math.round(window.innerHeight * 0.8));
-              await sleep(1200);
+              await sleep(sp.scroll);
               const atBottom = window.innerHeight + window.scrollY >= document.body.scrollHeight - 80;
               idle = newSeen === 0 && atBottom ? idle + 1 : 0;
               if (idle >= 3) break;
@@ -1121,25 +1281,61 @@
       }
   }
 
-  function startUnfollow(opts) {
-      if (unf.running) return { ok: false, error: 'Already running' };
+  function onOwnFollowingPage() {
       detectOwnUsername();
       const m = window.location.pathname.match(/^\/([A-Za-z0-9_]+)\/following\/?$/);
-      if (!m || (ownUsername && m[1].toLowerCase() !== ownUsername)) return { ok: false, error: 'Open YOUR Following page' };
+      return !!m && !!ownUsername && m[1].toLowerCase() === ownUsername;
+  }
+
+  // Start from anywhere: if we're not on YOUR Following page, remember the job, go there, and resume after load
+  async function requestUnfollow(opts) {
+      if (unf.running) return { ok: false, error: 'Already running' };
+      if (onOwnFollowingPage()) return startUnfollow(opts);
+      try { await chrome.storage.local.set({ [PENDING_KEY]: { max: opts.max, skip: opts.skip || [], speed: opts.speed, ts: Date.now(), hops: 0 } }); } catch (e) { }
+      unfPanel('Opening your Following page…', { finished: true });
+      resumePendingUnfollow();
+      return { ok: true, navigating: true };
+  }
+
+  async function resumePendingUnfollow() {
+      let job;
+      try { job = (await chrome.storage.local.get(PENDING_KEY))[PENDING_KEY]; } catch (e) { return; }
+      if (!job) return;
+      const clear = () => { try { chrome.storage.local.remove(PENDING_KEY); } catch (e) { } };
+      if (Date.now() - job.ts > 3 * 60 * 1000 || (job.hops || 0) > 2) { clear(); return; }
+
+      for (let i = 0; i < 40 && !ownUsername; i++) { detectOwnUsername(); if (!ownUsername) await sleep(250); }
+      if (!ownUsername) { clear(); unfPanel('Could not find your username — open your profile once, then retry.', { finished: true }); return; }
+
+      if (!onOwnFollowingPage()) {
+          job.hops = (job.hops || 0) + 1;
+          try { await chrome.storage.local.set({ [PENDING_KEY]: job }); } catch (e) { }
+          window.location.assign(`/${ownUsername}/following`);
+          return;
+      }
+      for (let i = 0; i < 40 && !document.querySelector('[data-testid="UserCell"]'); i++) await sleep(250);
+      clear();
+      if (unf.panel) { unf.panel.remove(); unf.panel = null; }
+      startUnfollow(job);
+  }
+
+  function startUnfollow(opts) {
+      if (unf.running) return { ok: false, error: 'Already running' };
+      if (!onOwnFollowingPage()) return { ok: false, error: 'Open YOUR Following page' };
       unf.running = true;
       unf.stop = false;
       unf.done = 0;
       const max = opts.max > 0 ? opts.max : Infinity;
       const skip = new Set((opts.skip || []).map(s => String(s).toLowerCase().replace(/^@/, '').trim()).filter(Boolean));
       unfPanel('Starting…');
-      runUnfollow(max, skip);
+      runUnfollow(max, skip, UNF_SPEEDS[opts.speed] || UNF_SPEEDS.fast);
       return { ok: true };
   }
 
   function initUnfollowListener() {
       chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-          if (!msg || !msg.type) return;
-          if (msg.type === 'XRB_UNFOLLOW_START') { sendResponse(startUnfollow(msg)); return; }
+          if (!alive() || !msg || !msg.type) return;
+          if (msg.type === 'XRB_UNFOLLOW_START') { requestUnfollow(msg).then(sendResponse); return true; }
           if (msg.type === 'XRB_UNFOLLOW_STOP') { unf.stop = true; sendResponse({ ok: true }); return; }
           if (msg.type === 'XRB_UNFOLLOW_STATUS') { sendResponse({ running: unf.running, done: unf.done }); return; }
       });
@@ -1147,30 +1343,33 @@
 
 
   // ── main.js ──
+  const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
+      'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+
   function loadSettings(cb) {
-      chrome.storage.sync.get(
-          ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor', 'showFollowers', 'followersMode', 'showRelation', 'relOnlyFollowing'],
-          data => {
-              blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim()).filter(Boolean);
-              compileRegions();
-              blockMode = data.blockMode || 'overlay';
-              blockAffiliate = !!data.blockAffiliate;
-              blockAffiliated = !!data.blockAffiliated;
-              whitelistMode = data.whitelistMode || 'mutuals';
-              showLabels = data.showLabels !== false;
-              followersMode = data.followersMode || (data.showFollowers === false ? 'off' : 'nofollowback');
-              showRelation = data.showRelation !== false;
-              relOnlyFollowing = data.relOnlyFollowing !== false;
-              themeColor = data.themeColor || '#ff2222';
-              labelColor = data.labelColor || '#22c55e';
-              applyThemeStyle();
-              if (cb) cb();
-          });
+      chrome.storage.sync.get(SETTING_KEYS, data => {
+          blockedRegions = (data.blockedRegions || []).map(r => r.toLowerCase().trim()).filter(Boolean);
+          compileRegions();
+          blockMode = data.blockMode || 'overlay';
+          blockAffiliate = !!data.blockAffiliate;
+          blockAffiliated = !!data.blockAffiliated;
+          whitelistMode = data.whitelistMode || 'mutuals';
+          showLabels = data.showLabels !== false;
+          followersMode = data.followersMode || (data.showFollowers === false ? 'off' : 'nofollowback');
+          showRelation = data.showRelation !== false;
+          relOnlyFollowing = data.relOnlyFollowing !== false;
+          themeColor = data.themeColor || '#ff2222';
+          labelColor = data.labelColor || '#22c55e';
+          applyThemeStyle();
+          if (cb) cb();
+      });
   }
 
   chrome.storage.onChanged.addListener((changes, area) => {
+      if (!alive()) return;
       if (area !== 'sync') return;
-      const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode', 'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
+      const keys = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
+          'showLabels', 'themeColor', 'labelColor', 'followersMode', 'showRelation', 'relOnlyFollowing'];
       if (!keys.some(k => changes[k])) return;
       loadSettings(() => {
           pendingUsernames.clear();
@@ -1183,6 +1382,7 @@
 
   function listenToInjector() {
       window.addEventListener(CHANNEL, e => {
+          if (!alive()) { shutdown(); return; }
           let msg = e.detail;
           try { if (typeof msg === 'string') msg = JSON.parse(msg); } catch (_) { return; }
           const { type, payload } = msg || {};
@@ -1191,7 +1391,7 @@
           switch (type) {
               case 'user_info': {
                   const { username, location, following, followedBy, affiliated, followers } = payload;
-                  if (typeof followers === 'number') followersCache.set(username, followers);
+                  if (typeof followers === 'number') { followersCache.set(username, followers); persistRel(username); }
                   if (typeof following === 'boolean' || typeof followedBy === 'boolean') {
                       if (updateRel(username, following, followedBy)) scheduleFullRefresh();
                   }
@@ -1216,7 +1416,13 @@
                   }
                   break;
               case 'query_template':
-                  if (payload.hash) {
+                  if (payload.op === 'UserByScreenName' && payload.hash) {
+                      userTemplate.hash = payload.hash;
+                      userTemplate.features = payload.features || null;
+                      userTemplate.fieldToggles = payload.fieldToggles || null;
+                      userTemplate.variables = payload.variables || null;
+                      saveTemplate();
+                  } else if (payload.hash) {
                       aboutTemplate.hash = payload.hash;
                       if (payload.features) aboutTemplate.features = payload.features;
                       if (payload.fieldToggles) aboutTemplate.fieldToggles = payload.fieldToggles;
@@ -1239,8 +1445,10 @@
   }
 
   async function init() {
+      document.documentElement.dataset.xrbInstance = INSTANCE_ID;   // claim the page: older instances will see this and stop
       await loadDiskCache();
       loadSettings(() => {
+          clearVisualTreatments();                                    // remove anything left behind by an older instance
           detectOwnUsername();
           listenToInjector();
           initUnfollowListener();
@@ -1256,8 +1464,9 @@
           setTimeout(scanAll, 3000);
           setTimeout(checkProfilePage, 1000);
           setTimeout(checkProfilePage, 2500);
+          resumePendingUnfollow();
       });
-      console.log('[XRB] v1.1 ready');
+      console.log('[XRB] v1.7 ready');
   }
 
   init();

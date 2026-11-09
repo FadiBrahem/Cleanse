@@ -38,7 +38,10 @@ function applyThemeStyle() {
 function detectOwnUsername() {
     const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
     const m = a && (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]+)/);
-    if (m) ownUsername = m[1].toLowerCase();
+    if (m && ownUsername !== m[1].toLowerCase()) {
+        ownUsername = m[1].toLowerCase();
+        try { chrome.storage.local.set({ xrb_own: ownUsername }); } catch (e) { }
+    }
 }
 
 // ───────────────────────── Treatments ─────────────────────────
@@ -173,14 +176,15 @@ function applyProfileBlock(username) {
     }
 }
 
-// ───────────────────────── Region labels ─────────────────────────
-// Works anywhere an "@handle" is rendered: timeline, replies, profile header, follower lists,
-// search, hover cards, notifications and the DM inbox/thread header.
+// ───────────────────────── Labels & chips ─────────────────────────
+// Region label, follower count and follow-back tag next to names/handles.
+// Works anywhere an "@handle" is rendered; the follow-back tag and "not following back" count are timeline-only.
 
 let handleIO = null;
 function getHandleIO() {
     if (handleIO) return handleIO;
     handleIO = new IntersectionObserver(entries => {
+        if (!alive()) { shutdown(); return; }
         entries.forEach(e => {
             if (!e.isIntersecting) return;
             handleIO.unobserve(e.target);
@@ -189,15 +193,16 @@ function getHandleIO() {
             if (m && !memCache.has(m[1].toLowerCase())) queueLookup(m[1]);
         });
     }, { rootMargin: '200px 0px' });
+    teardown.push(() => handleIO && handleIO.disconnect());
     return handleIO;
 }
 
-// Only X's real "Account based in" value is ever displayed
 // Keep it to the plain region/country name: drop "(Connected via …)"-style extras
 function cleanRegion(s) {
     return String(s).replace(/\s*\(.*?\)\s*/g, ' ').replace(/connected via.*$/i, '').replace(/\s+/g, ' ').trim();
 }
 
+// Only X's real "Account based in" value is ever displayed
 function labelInfo(u) {
     const e = memCache.get(u);
     if (!e || !e.country) return null;
@@ -205,50 +210,51 @@ function labelInfo(u) {
     return text ? { text, raw: e.country } : null;
 }
 
-// X renders the handle more than once per header; one chip/label per user per header
-function containerFor(span) {
-    return span.closest('[data-testid="User-Name"], [data-testid="UserName"], [data-testid="UserCell"], [data-testid="conversation"], article')
+// One chip per user per post/cell: scope is the whole post, and any extras are removed on sight
+function scopeFor(span) {
+    return span.closest('article, [data-testid="cellInnerDiv"], [data-testid="UserCell"], [data-testid="conversation"], [role="dialog"], [data-testid="HoverCard"]')
+        || span.closest('[data-testid="UserName"], [data-testid="User-Name"]')     // profile header (not inside an article)
         || span.parentElement;
 }
+function uniqueChip(scope, cls, u) {
+    if (!scope) return null;
+    const all = scope.querySelectorAll(`.${cls}[data-user="${u}"]`);
+    for (let i = 1; i < all.length; i++) all[i].remove();
+    return all[0] || null;
+}
 
-const labelOf = new WeakMap();   // handle <span> -> its region label element
-const chipOf = new WeakMap();    // handle <span> -> its followers chip element
+// "Doesn't follow you back": only an explicit followed_by=true counts as following you
+function notFollowingBack(u) {
+    if (!u || u === ownUsername) return false;
+    const r = relCache.get(u);
+    return !(r && r.followedBy === true);
+}
+
+// Put the chip in the same flex ROW as the anchor element (so it sits beside it, not under it):
+// climb until the parent is a row-direction flex container.
+function placeLabel(span, label, limit) {
+    let el = span.closest('a') || span;
+    if (limit && !limit.contains(el)) el = span;
+    for (let i = 0; i < 5 && el.parentElement; i++) {
+        const p = el.parentElement;
+        if (limit && !limit.contains(p)) break;                     // never place outside the dedupe scope
+        const cs = getComputedStyle(p);
+        if (cs.display.includes('flex') && cs.flexDirection.startsWith('row')) {
+            el.insertAdjacentElement('afterend', label);
+            return;
+        }
+        if (p.matches('[data-testid="User-Name"], [data-testid="UserName"], article')) break;
+        el = p;
+    }
+    const anchorEl = span.closest('a');
+    (anchorEl && (!limit || limit.contains(anchorEl)) ? anchorEl : span).insertAdjacentElement('afterend', label);
+}
 
 function fmtCount(n) {
     if (n >= 1e9) return (n / 1e9).toFixed(n >= 1e10 ? 0 : 1).replace(/\.0$/, '') + 'B';
     if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1).replace(/\.0$/, '') + 'K';
     return String(n);
-}
-
-// Follower count chip, placed right after the DISPLAY NAME (not the handle)
-function decorateFollowers(span, u) {
-    const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
-    if (!cont) return;
-    let chip = cont.querySelector(`.xrb-followers-chip[data-user="${u}"]`);
-    const n = followersCache.get(u);
-
-    let want = false;
-    if (typeof n === 'number') {
-        if (followersMode === 'always') want = true;
-        else if (followersMode === 'nofollowback') want = chipContext(span) && relStatus(u) === 'not';
-    }
-    if (!want) { if (chip) chip.remove(); return; }
-
-    const nameBlock = cont.firstElementChild;
-    if (!nameBlock) return;
-    if (!chip) {
-        const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
-            s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
-        if (!nameSpan) return;
-        chip = document.createElement('span');
-        chip.className = 'xrb-followers-chip';
-        chip.dataset.user = u;
-        placeLabel(nameSpan, chip);
-    }
-    const text = '👥 ' + fmtCount(n);
-    if (chip.textContent !== text) chip.textContent = text;
-    chip.title = `${n.toLocaleString()} followers`;
 }
 
 // Timeline-style headers only: never on Following/Followers lists, user cells or DM lists
@@ -267,39 +273,58 @@ function relStatus(u) {
     return r.followedBy ? 'follows' : 'not';
 }
 
+// Follower count chip, placed right after the DISPLAY NAME (not the handle)
+function decorateFollowers(span, u) {
+    const cont = span.closest('[data-testid="User-Name"], [data-testid="UserName"]');
+    if (!cont) return;
+    let chip = uniqueChip(scopeFor(span), 'xrb-followers-chip', u);
+    const n = followersCache.get(u);
+    if (typeof n !== 'number' && followersMode !== 'off' && chipContext(span) &&
+        (followersMode === 'always' || notFollowingBack(u))) {
+        const r = span.getBoundingClientRect();                        // only accounts near the screen
+        if (r.bottom > -300 && r.top < window.innerHeight + 300) queueFollowers(u);
+    }
+
+    let want = false;
+    if (typeof n === 'number') {
+        if (followersMode === 'always') want = true;
+        else if (followersMode === 'nofollowback') want = chipContext(span) && notFollowingBack(u);
+    }
+    if (!want) { if (chip) chip.remove(); return; }
+
+    const nameBlock = cont.firstElementChild;
+    if (!nameBlock) return;
+    if (!chip) {
+        const nameSpan = [...nameBlock.querySelectorAll('span')].find(s =>
+            s.children.length === 0 && s.textContent.trim() && s.textContent.trim().charAt(0) !== '@');
+        if (!nameSpan) return;
+        chip = document.createElement('span');
+        chip.className = 'xrb-followers-chip';
+        chip.dataset.user = u;
+        placeLabel(nameSpan, chip, scopeFor(span));
+    }
+    const text = '👥 ' + fmtCount(n);
+    if (chip.textContent !== text) chip.textContent = text;
+    chip.title = `${n.toLocaleString()} followers`;
+}
+
 function decorateRelation(span, u) {
-    const holder = containerFor(span);
-    let chip = holder.querySelector(`.xrb-rel-chip[data-user="${u}"]`);
-    const st = showRelation && chipContext(span) ? relStatus(u) : null;
+    if (!chipContext(span)) return;          // hidden/duplicate handle copies must not add OR remove the chip
+    const holder = scopeFor(span);
+    let chip = uniqueChip(holder, 'xrb-rel-chip', u);
+    const st = showRelation ? relStatus(u) : null;
     if (!st) { if (chip) chip.remove(); return; }
     if (!chip) {
         chip = document.createElement('span');
         chip.className = 'xrb-rel-chip';
         chip.dataset.user = u;
         const lab = holder.querySelector(`.xrb-region-label[data-user="${u}"]`);
-        if (lab) lab.insertAdjacentElement('afterend', chip); else placeLabel(span, chip);
+        if (lab) lab.insertAdjacentElement('afterend', chip); else placeLabel(span, chip, holder);
     }
     chip.classList.toggle('xrb-rel-chip--yes', st === 'follows');
     chip.classList.toggle('xrb-rel-chip--no', st === 'not');
     const text = st === 'follows' ? '✓ Follows you' : '✗ Not following you';
     if (chip.textContent !== text) chip.textContent = text;
-}
-
-// Put the label in the same flex ROW as the handle (so it sits beside it, not under it):
-// climb from the handle until the parent is a row-direction flex container.
-function placeLabel(span, label) {
-    let el = span.closest('a') || span;
-    for (let i = 0; i < 5 && el.parentElement; i++) {
-        const p = el.parentElement;
-        const cs = getComputedStyle(p);
-        if (cs.display.includes('flex') && cs.flexDirection.startsWith('row')) {
-            el.insertAdjacentElement('afterend', label);
-            return;
-        }
-        if (p.matches('[data-testid="User-Name"], [data-testid="UserName"], article')) break;
-        el = p;
-    }
-    (span.closest('a') || span).insertAdjacentElement('afterend', label);
 }
 
 function decorateHandleEl(span) {
@@ -318,13 +343,13 @@ function decorateHandleEl(span) {
         if (!info) {
             if (!span.dataset.xrbIo) { span.dataset.xrbIo = '1'; getHandleIO().observe(span); }
         } else {
-            const holder = containerFor(span);
-            let label = holder.querySelector(`.xrb-region-label[data-user="${u}"]`);
+            const holder = scopeFor(span);
+            let label = uniqueChip(holder, 'xrb-region-label', u);
             if (!label) {
                 label = document.createElement('span');
                 label.className = 'xrb-region-label';
                 label.dataset.user = u;
-                placeLabel(span, label);
+                placeLabel(span, label, holder);
             }
             const shown = info.text.length > 28 ? info.text.slice(0, 27) + '…' : info.text;
             const text = '📍 ' + shown;

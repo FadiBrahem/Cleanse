@@ -2,6 +2,7 @@ const CHANNEL = '__xrb_data__';
 const READY_EVENT = '__xrb_ready__';
 const CACHE_KEY = 'xrb_location_cache_v3';   // v3: drops entries that may have come from free-text profile locations
 const TEMPLATE_KEY = 'xrb_about_template_v1';
+const REL_KEY = 'xrb_rel_cache_v1';
 const CACHE_TTL = 30 * 24 * 60 * 60 * 1000;
 const NEG_TTL = 3 * 24 * 60 * 60 * 1000;
 
@@ -14,16 +15,16 @@ let blockAffiliated = false;     // accounts wearing an X "affiliated with" badg
 let whitelistMode = 'mutuals';   // 'mutuals' | 'following' | 'none'
 let showLabels = true;
 let followersMode = 'nofollowback';   // 'nofollowback' | 'always' | 'off'
-let showRelation = true;               // green "Follows you" / red "Not following you" (timeline only)
-let relOnlyFollowing = true;           // ...only for accounts I follow
+let showRelation = true;              // green "Follows you" / red "Not following you" (timeline only)
+let relOnlyFollowing = true;          // ...only for accounts I follow
 let themeColor = '#ff2222';
 let labelColor = '#22c55e';      // region label colour (popup option)
 
 // ── Runtime data ──
 const memCache = new Map();          // username -> { country, ts, src }
-const profileLoc = new Map();        // username -> self-written profile location (free text)
-const relCache = new Map();
-const followersCache = new Map();   // username -> follower count          // username -> { following, followedBy }
+const profileLoc = new Map();        // username -> self-written profile location (free text; blocking fallback only)
+const relCache = new Map();          // username -> { following, followedBy }
+const followersCache = new Map();    // username -> follower count
 const affiliatedUsers = new Set();
 const affiliateUserCounts = new Map();
 const affiliateTweetIds = new Set();
@@ -41,6 +42,17 @@ let rateLimitedUntil = 0;
 let activeRequests = 0;
 let nativeAboutAt = 0;               // last time X itself called/showed AboutAccountQuery
 
+// UserByScreenName template (learned from X's own profile requests) — used only to fetch follower counts
+const userTemplate = { hash: null, features: null, fieldToggles: null, variables: null };
+let userRateLimitedUntil = 0;
+const followersQueue = [];
+const followersQueueSet = new Set();
+const followersTried = new Set();
+const followerStamps = [];
+let followersRunning = false;
+const FOLLOWERS_BUDGET = 60;                  // max follower lookups per 15 min
+const FOLLOWERS_WINDOW = 15 * 60 * 1000;
+
 const aboutTemplate = {
     hash: 'XRqGa7EeokUU5kppkh13EA',   // last-resort default; real hash is learned from X's traffic / bundle
     features: null,
@@ -56,9 +68,24 @@ const SKIP = new Set(['home', 'explore', 'notifications', 'messages', 'search',
 
 const HANDLE_RE = /^@([A-Za-z0-9_]{1,15})$/;
 const LIST_PATH = /^\/[^/]+\/(following|followers|verified_followers|followers_you_follow)\/?$/;
-const REL_KEY = 'xrb_rel_cache_v1';
 const SENSITIVE_PATH = /^\/(notifications|messages|i\/chat)/;
 const ARTICLE_SEL = 'article[data-testid="tweet"], article[role="article"]';
+
+// ── Instance identity: after an extension reload the OLD content script keeps running in open tabs.
+//    Each instance stamps the page; any instance that no longer owns the stamp (or lost chrome.runtime) shuts itself down.
+const INSTANCE_ID = Date.now() + '-' + Math.random().toString(36).slice(2);
+const teardown = [];
+let dead = false;
+function alive() {
+    try { return !!chrome.runtime?.id && document.documentElement.dataset.xrbInstance === INSTANCE_ID; }
+    catch (e) { return false; }
+}
+function shutdown() {
+    if (dead) return;
+    dead = true;
+    teardown.forEach(f => { try { f(); } catch (e) { } });
+    console.log('[XRB] stale instance shut down');
+}
 
 let lastPath = '';
 

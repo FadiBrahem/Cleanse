@@ -30,10 +30,11 @@ const themeColorInput = $('themeColorInput');
 const labelColorInput = $('labelColorInput');
 const unfollowMax = $('unfollowMax');
 const unfollowSkip = $('unfollowSkip');
+const unfollowSpeed = $('unfollowSpeed');
 
 const SETTING_KEYS = ['blockedRegions', 'blockMode', 'blockAffiliate', 'blockAffiliated', 'whitelistMode',
   'showLabels', 'followersMode', 'showFollowers', 'showRelation', 'relOnlyFollowing', 'themeColor', 'labelColor',
-  'unfollowMax', 'unfollowSkip'];
+  'unfollowMax', 'unfollowSkip', 'unfollowSpeed'];
 
 function saveAndSync() {
   chrome.storage.sync.set({
@@ -66,7 +67,8 @@ function loadSettings() {
     whitelistSelect.value = whitelistMode;
     themeColorInput.value = themeColor;
     labelColorInput.value = labelColor;
-    unfollowMax.value = data.unfollowMax != null ? data.unfollowMax : 50;
+    unfollowMax.value = data.unfollowMax != null ? data.unfollowMax : 100;
+    unfollowSpeed.value = data.unfollowSpeed || 'fast';
     unfollowSkip.value = data.unfollowSkip || '';
     render();
   });
@@ -151,6 +153,7 @@ labelColorInput.addEventListener('input', e => { labelColor = e.target.value; sa
 
 // ── Unfollow non-followers ──
 unfollowMax.addEventListener('change', () => chrome.storage.sync.set({ unfollowMax: parseInt(unfollowMax.value, 10) || 0 }));
+unfollowSpeed.addEventListener('change', () => chrome.storage.sync.set({ unfollowSpeed: unfollowSpeed.value }));
 unfollowSkip.addEventListener('change', () => chrome.storage.sync.set({ unfollowSkip: unfollowSkip.value }));
 
 async function activeTab() {
@@ -160,16 +163,21 @@ async function activeTab() {
 
 $('unfollowStart').addEventListener('click', async () => {
   const t = await activeTab();
-  if (!t || !/^https:\/\/(x|twitter)\.com\/[^/?#]+\/following\/?([?#]|$)/.test(t.url || '')) {
-    showToast('Open your Following page first');
-    return;
-  }
+  if (!t) return;
   const max = parseInt(unfollowMax.value, 10) || 0;
   const skip = unfollowSkip.value.split(/[,\s]+/).filter(Boolean);
-  if (!confirm(`Unfollow up to ${max || 'ALL'} accounts that don't follow you back?\n\nIt runs slowly on purpose, and you can stop it any time.`)) return;
-  chrome.tabs.sendMessage(t.id, { type: 'XRB_UNFOLLOW_START', max, skip }, res => {
-    if (chrome.runtime.lastError || !res) showToast('Reload the X tab first');
-    else showToast(res.ok ? 'Started — see panel on page' : res.error);
+  const speed = unfollowSpeed.value;
+  if (!confirm(`Unfollow up to ${max || 'ALL'} accounts that don't follow you back?\n\nSpeed: ${speed}. You can stop it any time.\n\nFaster speeds can trigger X's action limits.`)) return;
+  chrome.tabs.sendMessage(t.id, { type: 'XRB_UNFOLLOW_START', max, skip, speed }, res => {
+    if (chrome.runtime.lastError || !res) {
+      // Not on X (or the tab has no live script): save the job and open X — it resumes automatically after load
+      chrome.storage.local.set({ xrb_pending_unfollow: { max, skip, speed, ts: Date.now(), hops: 0 } }, () => {
+        chrome.tabs.update(t.id, { url: 'https://x.com/home' });
+        showToast('Opening X…');
+      });
+    } else {
+      showToast(res.ok ? 'Opening Following — see panel' : res.error);
+    }
   });
 });
 

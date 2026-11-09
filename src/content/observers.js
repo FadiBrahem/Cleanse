@@ -8,18 +8,21 @@ function scheduleDecorate(node) {
         decorateTimer = null;
         const nodes = [...decorateBuf];
         decorateBuf.clear();
+        if (!alive()) return;
         nodes.forEach(n => { if (n.isConnected) decorateWithin(n); });
     }, 150);
 }
 
 function isOwnNode(node) {
     const c = node.classList;
-    return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') || c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
+    return !!c && (c.contains('xrb-region-label') || c.contains('xrb-followers-chip') || c.contains('xrb-rel-chip') ||
+        c.contains('xrb-overlay') || c.contains('xrb-red-circle') ||
         c.contains('xrb-banner') || c.contains('xrb-profile-no-symbol'));
 }
 
 function startObserver() {
-    new MutationObserver(mutations => {
+    const mo = new MutationObserver(mutations => {
+        if (!alive()) { shutdown(); return; }
         const newArticles = [];
 
         mutations.forEach(m => {
@@ -46,13 +49,16 @@ function startObserver() {
             clearTimeout(window._xrbObsTimer);
             window._xrbObsTimer = setTimeout(() => newArticles.forEach(a => a.isConnected && processArticle(a)), 150);
         }
-    }).observe(document.body, { childList: true, subtree: true });
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
+    teardown.push(() => mo.disconnect());
 
     lastPath = window.location.pathname;
 }
 
 function startIntersectionObserver() {
     const io = new IntersectionObserver(entries => {
+        if (!alive()) { shutdown(); return; }
         entries.forEach(entry => {
             if (!entry.isIntersecting) return;
             const art = entry.target;
@@ -66,7 +72,9 @@ function startIntersectionObserver() {
         });
     }
     observe();
-    new MutationObserver(observe).observe(document.body, { childList: true, subtree: true });
+    const mo2 = new MutationObserver(() => { if (!alive()) { shutdown(); return; } observe(); });
+    mo2.observe(document.body, { childList: true, subtree: true });
+    teardown.push(() => { mo2.disconnect(); io.disconnect(); });
 }
 
 // Articles that are on screen but still unresolved (lookup dropped / paused) get re-queued
@@ -81,7 +89,8 @@ function retryVisibleArticles() {
 
 function startIntervalScan() {
     let tick = 0;
-    setInterval(() => {
+    const iv = setInterval(() => {
+        if (!alive()) { shutdown(); return; }
         tick++;
         detectOwnUsername();
         if (blockedRegions.length || blockAffiliate || blockAffiliated) rescanDOM();
@@ -93,7 +102,9 @@ function startIntervalScan() {
         if (tick % 2 === 1) decorateWithin(document.body);
 
         if (lookupQueue.length > 0 && !queueRunning && !lookupsPaused()) drainQueue();
+        if (followersQueue.length > 0 && !followersRunning) drainFollowers();
     }, 1500);
+    teardown.push(() => clearInterval(iv));
 }
 
 // Learn passively from X's own About UI — no request of ours needed

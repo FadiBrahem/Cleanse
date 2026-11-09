@@ -1,8 +1,8 @@
 'use strict';
 
 // The manifest already injects injector.js / content.js on every X page load.
-// The service worker only covers tabs that were open BEFORE the extension was
-// installed/reloaded. Both scripts have re-entry guards, so a double inject is harmless.
+// The service worker only covers tabs that were open BEFORE the extension was installed/reloaded.
+// Both scripts have re-entry guards; a newer content script also takes over from (and stops) older instances.
 async function injectIntoExistingTabs() {
   try {
     const tabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
@@ -25,7 +25,7 @@ chrome.runtime.onInstalled.addListener(injectIntoExistingTabs);
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message && message.type === 'PING') {
-    sendResponse({ ok: true, version: '1.1.0' });
+    sendResponse({ ok: true, version: '1.7.0' });
     return true;
   }
 });

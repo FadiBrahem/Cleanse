@@ -1,13 +1,13 @@
 const pendingDisk = new Map();
 const pendingRel = new Map();
-let relTimer = null;
 let diskTimer = null;
+let relTimer = null;
 let refreshTimer = null;
 let fullRefreshTimer = null;
 
 async function loadDiskCache() {
     try {
-        const stored = await chrome.storage.local.get([CACHE_KEY, TEMPLATE_KEY]);
+        const stored = await chrome.storage.local.get([CACHE_KEY, TEMPLATE_KEY, 'xrb_own']);
         const raw = stored[CACHE_KEY] || {};
         const now = Date.now();
         let loaded = 0;
@@ -18,24 +18,29 @@ async function loadDiskCache() {
         try {
             const rs = (await chrome.storage.local.get(REL_KEY))[REL_KEY] || {};
             for (const [u, e] of Object.entries(rs)) {
-                if (now - e.ts < 7 * 24 * 60 * 60 * 1000) relCache.set(u, { following: e.f, followedBy: e.fb });
+                if (now - e.ts >= 7 * 24 * 60 * 60 * 1000) continue;
+                if (typeof e.fb === 'boolean' || typeof e.f === 'boolean') relCache.set(u, { following: e.f, followedBy: e.fb });
+                if (typeof e.c === 'number') followersCache.set(u, e.c);
             }
         } catch (e) { }
+        if (stored.xrb_own && !ownUsername) ownUsername = stored.xrb_own;
         const t = stored[TEMPLATE_KEY];
         if (t && t.hash) {
             aboutTemplate.hash = t.hash;
             aboutTemplate.features = t.features || null;
             aboutTemplate.fieldToggles = t.fieldToggles || null;
         }
+        if (t && t.user && t.user.hash) Object.assign(userTemplate, t.user);
         console.log('[XRB] Cache loaded:', loaded, 'entries');
     } catch (e) { }
 }
 
 // Follow relationships learned from X's data or from your Following/Followers pages (kept 7 days)
 function persistRel(u) {
-    const r = relCache.get(u);
-    if (!r || typeof r.followedBy !== 'boolean') return;
-    pendingRel.set(u, { f: r.following, fb: r.followedBy, ts: Date.now() });
+    const r = relCache.get(u) || {};
+    const c = followersCache.get(u);
+    if (typeof r.followedBy !== 'boolean' && typeof c !== 'number') return;
+    pendingRel.set(u, { f: r.following, fb: r.followedBy, c, ts: Date.now() });
     if (!relTimer) relTimer = setTimeout(flushRel, 4000);
 }
 
@@ -55,7 +60,7 @@ async function flushRel() {
 }
 
 function saveTemplate() {
-    try { chrome.storage.local.set({ [TEMPLATE_KEY]: { ...aboutTemplate } }); } catch (e) { }
+    try { chrome.storage.local.set({ [TEMPLATE_KEY]: { ...aboutTemplate, user: { ...userTemplate } } }); } catch (e) { }
 }
 
 // Writes are batched: one read-modify-write per 3s instead of one per lookup
@@ -91,6 +96,7 @@ function cacheResult(username, country, src) {
 function scheduleRefresh() {
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
+        if (!alive()) return;
         if (blockedRegions.length) rescanDOM();
         decorateWithin(document.body);
         checkProfilePage();
@@ -101,6 +107,7 @@ function scheduleRefresh() {
 function scheduleFullRefresh() {
     clearTimeout(fullRefreshTimer);
     fullRefreshTimer = setTimeout(() => {
+        if (!alive()) return;
         clearVisualTreatments();
         scanAll();
         decorateWithin(document.body);

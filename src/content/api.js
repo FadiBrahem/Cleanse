@@ -40,9 +40,32 @@ function lookupsPaused() {
     return now < rateLimitedUntil || now - nativeAboutAt < 20000 || document.hidden || isAboutOpen();
 }
 
+function findFollowersDeep(o) {
+    const q = [[o, 0]];
+    while (q.length) {
+        const [x, d] = q.shift();
+        for (const k of Object.keys(x)) {
+            const v = x[k];
+            if (typeof v === 'number' && /^(?:normal_)?followers(?:_count)?$/i.test(k)) return v;
+            if (v && typeof v === 'object' && !Array.isArray(v) && d < 3) q.push([v, d + 1]);
+        }
+    }
+    return undefined;
+}
+
+function xHeaders() {
+    return {
+        'authorization': `Bearer ${BEARER}`,
+        'x-csrf-token': getCsrfToken(),
+        'x-twitter-active-user': 'yes',
+        'x-twitter-auth-type': 'OAuth2Session',
+        'x-twitter-client-language': 'en'
+    };
+}
+
 function ingestUserResult(username, result) {
-    const fc = result?.legacy?.followers_count;
-    if (typeof fc === 'number') followersCache.set(username, fc);
+    const fc = findFollowersDeep(result);
+    if (typeof fc === 'number') { followersCache.set(username, fc); persistRel(username); }
     const rp = result?.relationship_perspectives || {};
     const following = rp.following ?? result?.legacy?.following;
     const followedBy = rp.followed_by ?? result?.legacy?.followed_by;
@@ -139,6 +162,7 @@ async function drainQueue() {
     queueRunning = true;
     try {
         while (lookupQueue.length > 0) {
+            if (!alive()) break;
             if (lookupsPaused()) break;                          // interval scan resumes us
             if (activeRequests >= MAX_CONCURRENT) { await sleep(300); continue; }
             const username = lookupQueue.pop();                  // newest first = what's on screen now
@@ -151,4 +175,62 @@ async function drainQueue() {
     } finally {
         queueRunning = false;
     }
+}
+
+// ── Follower counts: X no longer ships them in timeline data, so fetch per account (only for accounts that need
+//    a chip, only ones near the viewport, ≤60 per 15 min). Uses the UserByScreenName request shape X itself used. ──
+function followersBudgetOk() {
+    const now = Date.now();
+    while (followerStamps.length && now - followerStamps[0] > FOLLOWERS_WINDOW) followerStamps.shift();
+    return followerStamps.length < FOLLOWERS_BUDGET;
+}
+
+function queueFollowers(u) {
+    if (!userTemplate.hash || !userTemplate.variables) return;       // learned after X loads any profile
+    if (followersCache.has(u) || followersTried.has(u) || followersQueueSet.has(u)) return;
+    if (Date.now() < userRateLimitedUntil) return;
+    if (followersQueue.length >= 40) followersQueueSet.delete(followersQueue.shift());
+    followersQueue.push(u);
+    followersQueueSet.add(u);
+    if (!followersRunning) drainFollowers();
+}
+
+async function drainFollowers() {
+    if (followersRunning) return;
+    followersRunning = true;
+    try {
+        while (followersQueue.length) {
+            if (!alive() || document.hidden || Date.now() < userRateLimitedUntil || !followersBudgetOk()) break;
+            const u = followersQueue.pop();                           // newest = what's on screen
+            followersQueueSet.delete(u);
+            if (followersCache.has(u)) continue;
+            await lookupFollowers(u);
+            await sleep(2500 + Math.random() * 1500);
+        }
+    } finally {
+        followersRunning = false;
+    }
+}
+
+async function lookupFollowers(u) {
+    followersTried.add(u);
+    followerStamps.push(Date.now());
+    try {
+        let vars;
+        try { vars = JSON.parse(userTemplate.variables); } catch (e) { return; }
+        let set = false;
+        for (const k of Object.keys(vars)) if (/^screen_?name$/i.test(k)) { vars[k] = u; set = true; }
+        if (!set) return;
+        let url = `https://x.com/i/api/graphql/${userTemplate.hash}/UserByScreenName?variables=${encodeURIComponent(JSON.stringify(vars))}`;
+        if (userTemplate.features) url += `&features=${encodeURIComponent(userTemplate.features)}`;
+        if (userTemplate.fieldToggles) url += `&fieldToggles=${encodeURIComponent(userTemplate.fieldToggles)}`;
+        const res = await fetch(url, { headers: xHeaders(), credentials: 'include' });
+        if (res.status === 429) { userRateLimitedUntil = Date.now() + 15 * 60 * 1000; followersTried.delete(u); return; }
+        if (!res.ok) return;
+        const data = await res.json();
+        const result = data?.data?.user?.result || data?.data?.user_result_by_screen_name?.result;
+        if (!result) return;
+        ingestUserResult(u, result);
+        scheduleDecorate(document.body);
+    } catch (e) { }
 }
